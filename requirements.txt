@@ -1,0 +1,9 @@
+PyQt5
+matplotlib
+numpy
+scipy
+shapely
+pydantic
+python-docx
+# 以下为打包(main.py)时所需，仅分发 EXE 时需要
+# PyInstaller

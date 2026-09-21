@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 测试与缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 运行产物
+runtime.log
+temp_sweep*.png
+
+# OCR 中间产物
+_md_work/
+
+# 一次性临时脚本
+_gen_demo_models.py
+_ra.py
+_scan_tmp.py
+_verify_ra.py
+
+# 规范原文 PDF（19MB 大体积二进制，以 OCR 版 .md 代替入库）
+公路大件运输安全通行评价技术规范.pdf
+
+# IDE
+.idea/
+.vscode/
