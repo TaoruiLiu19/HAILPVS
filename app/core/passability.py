@@ -15,12 +15,16 @@ from shapely.geometry import Polygon, MultiPolygon, box
 from shapely.ops import unary_union
 
 from config import (TURN_SAFE_CLEARANCE, LATERAL_CLEARANCE_BY_GRADE,
-                    VERT_CLEARANCE_MARGIN, INTERSECTION_RESERVE,
-                    HIGHWAY_GRADES, DEFAULT_SUPERELEVATION, PAD_FRICTION)
+                    INTERSECTION_RESERVE,
+                    HIGHWAY_GRADES, DEFAULT_SUPERELEVATION, PAD_FRICTION, g,
+                    VERT_CROSS_STRUCTURE, TUNNEL_CROWN_CLEARANCE,
+                    TUNNEL_SIDE_CLEARANCE, TUNNEL_HIGH_REQ_BOTTOM,
+                    TUNNEL_GROUND_CLEARANCE, RAMP_CLEARANCE, VERT_SCENARIO)
 from .datamodel import InputBundle
 from .kinematics import (TractorTrailerKinematics, run_profile,
                          build_trajectory_geoms, hydraulic_turn_radii)
 from .swept_path import measure_steady_turn, polylist_to_multipoly
+from . import transverse as _transverse
 from . import grade as _grade
 from . import lateral as _lateral
 
@@ -95,14 +99,53 @@ def _vehicle_cargo_lines(bundle: InputBundle) -> list[str]:
 
 
 def _vertical_check(bundle: InputBundle):
-    """垂直净空校验（M7）：车货总高 + 附加余量 ≤ 净空高度。"""
+    """垂直净空校验（M7）：按净空场景分阈值判定。
+
+    返回 (ok, total_h, margin, msg)。margin 为场景对应的"不应小于"阈值，
+    用于结果展示与消息文本。
+    """
     total_h = _cargo_total_height(bundle)
     limit = bundle.road.vertical_clearance
-    margin = max(0.0, VERT_CLEARANCE_MARGIN)
-    ok = (total_h + margin) <= limit + _TOL
-    msg = (f"垂直净空：车货总高 {total_h:.3f} m + 余量 {margin:.3f} m "
-           f"{'≤' if ok else '>'} 净空 {limit:.3f} m。")
-    return ok, total_h, margin, msg
+    stype = bundle.road.clearance_structure_type
+    scenario = VERT_SCENARIO.get(stype, "cross")
+    gap = limit - total_h
+
+    if scenario == "tunnel":
+        # 隧道 9.2.1：顶部距洞顶(含设备) ≥0.20
+        req = TUNNEL_CROWN_CLEARANCE
+        ok = gap >= req - _TOL
+        msg = (f"隧道顶部净空：车货总高 {total_h:.3f} m，洞顶净空 {limit:.3f} m，"
+               f"顶部间隙 {gap:.3f} m {'≥' if ok else '<'} 要求 {req:.2f} m。")
+        # 侧壁/检修道/底缘取向净空属于空间结构评价，弯道内核仅校验顶部，
+        # 侧壁 0.5、检修道 0.2、底缘 0.2 在隧道专项模块（P2）中处理。
+        return ok, total_h, req, msg
+
+    if scenario == "ramp":
+        req_min = RAMP_CLEARANCE["minimum"]       # 不应 <0.25
+        ok = gap >= req_min - _TOL
+        disp = ("宜（间隙≥0.50m）" if gap >= RAMP_CLEARANCE["desirable"] - _TOL
+                else "不应通行（间隙<0.25m）")
+        msg = (f"匝道净空(6.3.2)：车货总高 {total_h:.3f} m，净空 {limit:.3f} m，"
+               f"间隙 {gap:.3f} m，判定{disp}；外廓与护栏预留不宜<0.50、不应<0.25。")
+        return ok, total_h, req_min, msg
+
+    # 跨线构造物 / 上跨桥（6.4.1，4.4.2）：不宜 <0.1，不应 <0.05
+    req_min = VERT_CROSS_STRUCTURE["minimum"]
+    ok = gap >= req_min - _TOL
+    if gap >= VERT_CROSS_STRUCTURE["desirable"] - _TOL:
+        disp = "宜（间隙≥0.10m）"
+    elif gap >= req_min - _TOL:
+        disp = "需采取措施（0.05≤间隙<0.10m）"
+    else:
+        disp = "不应通行（间隙<0.05m）"
+    msg = (f"跨线净空(6.4.1)：车货总高 {total_h:.3f} m，净空 {limit:.3f} m，"
+           f"间隙 {gap:.3f} m，判定{disp}。")
+    return ok, total_h, req_min, msg
+
+
+def grade_threshold(grade: str, spec: dict) -> float:
+    """返回场景对应阈值（保留，供报告使用）。"""
+    return spec["desirable"] if grade == "宜" else spec["minimum"]
 
 
 def _lateral_check(bundle: InputBundle, r_min: float):
@@ -121,6 +164,34 @@ def _lateral_check(bundle: InputBundle, r_min: float):
         "parking_ok": p_ok, "msg": msg,
         "mu": mu, "cg_height": cg_h, "superelevation": ih,
     }
+
+
+def _lateral_formula_lines(r_min: float, bundle: InputBundle, lat: dict) -> list[str]:
+    """横向稳定性（附录B.2）逐步推导文本：公式 + 代入数值。"""
+    v = bundle.max_speed_kmh
+    b = bundle.trailer.track_width
+    ih = lat["superelevation"]
+    mu = lat["mu"]
+    h = lat["cg_height"]
+    vch, vcv, vh = lat["Vch"], lat["Vcv"], lat["Vhmax"]
+    ok = lat["ok"]
+    lines = [
+        f"最内侧转弯半径 R = {r_min:.3f} m，轮距 b = {b:.2f} m，"
+        f"车货重心高 h = {h:.3f} m，超高 i_h = {ih:.3f}，衬垫摩擦系数 μ = {mu:.2f}",
+        f"侧滑临界速度 Vch = 3.6·√[g·R·(μ+i_h)/(1−μ·i_h)] "
+        f"= 3.6·√[{g:.2f}·{r_min:.3f}·({mu:.3f}+{ih:.3f})/(1−{mu:.3f}·{ih:.3f})] "
+        f"= {vch:.3f} km/h",
+        f"侧翻临界速度 Vcv = √[127·R·(b+2·h·i_h)/(2·h−b·i_h)] "
+        f"= √[127·{r_min:.3f}·({b:.3f}+2·{h:.3f}·{ih:.3f})/"
+        f"({2 * h:.3f}−{b:.3f}·{ih:.3f})] = {vcv:.3f} km/h",
+        f"最大稳定速度 Vhmax = min(Vch, Vcv) = min({vch:.3f}, {vcv:.3f}) = {vh:.3f} km/h",
+        f"行驶速度 V = {v:.1f} km/h {'≤' if v <= vh + 1e-9 else '>'} Vhmax({vh:.3f}) "
+        f"→ 侧向 {'通过' if v <= vh + 1e-9 else '不通过'}",
+        f"停车超高 B.2.3：i_h({ih:.3f}) {'<' if ih < b / (2 * h) else '≥'} b/(2h)="
+        f"{b / (2 * h):.3f} → {'满足' if lat['parking_ok'] else '不满足'} 停车横向稳定性",
+        f"横向稳定性总体：{'通过' if ok else '不通过'}。",
+    ]
+    return lines
 
 
 def _attach_common_checks(res: SweepScenarioResult, bundle: InputBundle,
@@ -143,7 +214,19 @@ def _attach_common_checks(res: SweepScenarioResult, bundle: InputBundle,
     res.metrics["horizontal_reserve"] = sigma
 
     res.pass_ok = bool(res.pass_ok) and vert_ok and lat["ok"]
-    return [vmsg, f"大件运输尺寸分级：{size_grade}（表3.2.4）。", lat["msg"]]
+
+    lines = [
+        "◆ 垂直净空校验：",
+        f"车货总高 H_总 = 车板高 + 货物高 = {bundle.trailer.deck_height:.3f} + "
+        f"{bundle.cargo.height:.3f} = {total_h:.3f} m",
+        f"净空间隙 gap = 净空 − H_总 = {bundle.road.vertical_clearance:.3f} − {total_h:.3f} "
+        f"= {bundle.road.vertical_clearance - total_h:.3f} m",
+        vmsg,
+        f"大件运输尺寸分级：{size_grade}（表3.2.4）。",
+        "◆ 横向稳定性（附录B.2）：",
+        *_lateral_formula_lines(r_inner_min, bundle, lat),
+    ]
+    return lines
 
 
 # =====================================================================
@@ -234,39 +317,50 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         swept_w = max(swept_w, b12["W"])     # 扫空宽度取 B.1.2-6 与仿真的较大值
 
     sigma = _effective_sigma(bundle)
-    # M1: 转弯通道宽度计入 0.5m 安全宽度；M3: 判据扣除两侧预留空间 σ
-    turn_channel_w = swept_w + TURN_SAFE_CLEARANCE       # B.1.1-1/B.1.2-1 口径
-    lane_avail = lane - 2.0 * sigma                      # 路面净宽（扣除两侧预留）
-    trans_width = lane                                   # 横向空间宽度（无加宽）
+    # M1: 转弯通道宽度计入 0.5m 安全宽度（B.1.1-1/B.1.2-1 口径）
+    turn_channel_w = swept_w + TURN_SAFE_CLEARANCE
+    road_w = _transverse.road_width(road, lane)           # 路面宽度
+    trans_w = _transverse.transverse_space_width(road, lane)  # 横向空间宽度（含加宽）
     clearance_outer = r_out - r_o
     clearance_inner = r_i - r_in
 
-    # M2: 内缘约束 + M3: 双侧预留
-    outer_ok = clearance_outer >= sigma - _TOL
-    inner_ok = clearance_inner >= sigma - _TOL
-    width_ok = turn_channel_w <= lane_avail + _TOL       # 4.3.1-1）
-    swept_ok = swept_w <= trans_width - 2.0 * sigma + _TOL  # 4.3.1-2）
-
-    # 表4.3.1 查表法半径判据（M5 辅助）
+    # 表4.3.1 查表法（M5）：查表优先（规范 3.1.2 / 4.3.1）
     size_grade = _grade.classify_bundle(bundle)
-    lookup = _grade.arch_lookup_apply(size_grade, r_in)
-    lookup_note = ""
-    if lookup is True:
-        lookup_note = f"尺寸级 {size_grade}：圆曲线内缘半径 {r_in:.3f} m > 表4.3.1 最小半径，查表法满足。"
-    elif lookup is False:
-        lookup_note = (f"尺寸级 {size_grade}：圆曲线内缘半径 {r_in:.3f} m 不大于表4.3.1 "
-                       f"最小半径，需按附录B验算/仿真（本系统已按验算口径判定）。")
-    else:
-        lookup_note = f"尺寸级 {size_grade}：表4.3.1 无半径数据，按附录B验算判定。"
+    lookup = _grade.arch_lookup_apply(size_grade, r_in, trans_w, swept_w)
+    lookup_note = {
+        "pass": (f"尺寸级 {size_grade}：圆曲线内缘半径 {r_in:.3f} m 与横向空间宽度 "
+                 f"{trans_w:.3f} m 均大于表4.3.1，查表法满足（直接判定）。"),
+        "fail": (f"尺寸级 {size_grade}：圆曲线半径或横向空间宽度不大于表4.3.1，"
+                 f"按附录B验算/仿真判定。"),
+        "fallback": (f"尺寸级 {size_grade}：表4.3.1 无该级数据，按附录B验算/仿真判定。"),
+    }.get(lookup)
 
-    pass_ok = outer_ok and inner_ok and width_ok and swept_ok
+    # 判定：查表命中即满足；否则回退到附录 B 验算口径（不再无条件覆盖查表）
+    if lookup == "pass":
+        method = "查表法（表4.3.1）"
+        pass_h = True
+        verdict = "查表法满足：圆曲线半径与通行空间宽度均大于表4.3.1 数值，空间可通行。"
+    else:
+        method = "验算法（附录B / 仿真C）"
+        # B.1 验算口径：①转弯通道宽度<路面宽度；②扫空宽度<横向空间宽度；
+        # ③/④内外缘与护栏等障碍物的预留 σ
+        width_ok = turn_channel_w <= road_w + _TOL
+        swept_ok = swept_w <= trans_w + _TOL
+        outer_ok = clearance_outer >= sigma - _TOL
+        inner_ok = clearance_inner >= sigma - _TOL
+        pass_h = width_ok and swept_ok and outer_ok and inner_ok
+        verdict = f"验算法判定{'通过' if pass_h else '不通过'}："
+    res.metrics["method"] = method
+    res.metrics["lookup"] = lookup
+    res.metrics["road_width"] = road_w
+    res.metrics["transverse_space_w"] = trans_w
 
     road_poly = _road_from_centerline(
         r_path, (lane / 2.0, lane / 2.0, lane / 2.0), _TURN_DEG)
     res.road = road_poly
     res.swept = swept
     res.vehicle_frames = _pick_poses(vgeoms)
-    res.metrics = {
+    res.metrics.update({
         "R_o": r_o, "R_i": r_i, "W_needed": swept_w,
         "R_min": r_o, "W": turn_channel_w,
         "W_swept": swept_w,
@@ -275,27 +369,48 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         "clearance_outer": max(0.0, clearance_outer),
         "clearance_inner": max(0.0, clearance_inner),
         "turn_channel_w": turn_channel_w,
-        "lane_avail": lane_avail,
-    }
+    })
     if b12 is not None:
         res.metrics["B1_2_Rin"] = b12["R_in"]
         res.metrics["B1_2_Rout"] = b12["R_out"]
         res.metrics["B1_2_W"] = b12["W"]
         res.metrics["B1_2_theta_deg"] = b12["theta_deg"]
-    res.pass_ok = pass_ok
+    res.pass_ok = pass_h
     res.verdict_lines = _vehicle_cargo_lines(bundle) + [
         "【弯道参数】",
         f"弯道类型：圆弧弯道；公路等级：{road.highway_grade}",
         f"道路外半径 R_o = {r_out:.3f} m，内半径 R_i = {r_in:.3f} m，车道宽 {lane:.3f} m",
         f"横向预留空间 σ = {sigma:.3f} m；垂直净空 {road.vertical_clearance:.3f} m",
         "【理论分析】",
-        f"车辆所需最小弯道外半径 R_min = {r_o:.3f} m（道路外半径 {r_out:.3f} m）",
-        f"车辆扫掠外径 R_o = {r_o:.3f} m，内径 R_i = {r_i:.3f} m",
-        f"转弯通道宽度（含 {TURN_SAFE_CLEARANCE:g} m 安全宽度）W = {turn_channel_w:.3f} m"
-        f"（扫空宽度 {swept_w:.3f} m；路面净宽 {lane_avail:.3f} m）",
-        f"外缘净空 = {clearance_outer:.3f} m，内缘净空 = {clearance_inner:.3f} m"
-        f"（两侧预留 σ = {sigma:.3f} m）",
+        "◆ 实际转弯半径（受最大转向角约束）",
+        f"目标半径 R_t = max(道路内半径 + 车道宽/2, 1) "
+        f"= max({r_in:.3f} + {lane / 2:.3f}, 1) = {r_target:.3f} m",
+        f"前轮转角 δ = arctan(轴距 / R_t) = arctan({kin.wheelbase:.3f} / {r_target:.3f}) "
+        f"= {math.degrees(delta_used):.2f}°（限位 {math.degrees(kin.max_delta):.1f}°）",
+        f"实际路径半径 R_path = 轴距 / tan(δ) = {kin.wheelbase:.3f} / tan{math.degrees(delta_used):.2f}° "
+        f"= {r_path:.3f} m",
+        "◆ 稳态扫掠量测（绕道路圆心 O）",
+        f"扫掠外径 R_o = {r_o:.3f} m；扫掠内径 R_i = {r_i:.3f} m",
+        f"扫空空间宽度 W_swept = R_o − R_i = {r_o:.3f} − {r_i:.3f} = {swept_w:.3f} m",
+        "◆ 转弯通道宽度（B.1.1-1/B.1.2-1，含安全宽度）",
+        f"W_turn = W_swept + {TURN_SAFE_CLEARANCE:g} = {swept_w:.3f} + {TURN_SAFE_CLEARANCE:.3f} "
+        f"= {turn_channel_w:.3f} m",
+        "◆ 路面宽度 / 横向空间宽度（4.2.2 / 4.3.1 第2款）",
+        f"路面宽度 W_road = 车道宽 + 硬路肩 = {lane:.3f} + {road.hard_shoulder_w:.3f} "
+        f"= {road_w:.3f} m",
+        f"横向空间宽度 W_横 = 车道宽 + 路缘带 + 硬路肩"
+        + (f" + 借用对向行车道 {lane:.3f}" if road.median_type != "物理隔离" else "")
+        + (f" + 圆曲线加宽 {road.curve_widening_w:.3f}" if road.has_curve_widening else "")
+        + f" = {trans_w:.3f} m",
+        "◆ 内/外缘与护栏等障碍物预留（σ）",
+        f"外缘净空 Δ_out = 道路外半径 − R_o = {r_out:.3f} − {r_o:.3f} = {clearance_outer:.3f} m "
+        f"{'≥' if clearance_outer >= sigma - _TOL else '<'} σ({sigma:.3f})"
+        f" → {'满足' if clearance_outer >= sigma - _TOL else '不满足'}",
+        f"内缘净空 Δ_in = R_i − 道路内半径 = {r_i:.3f} − {r_in:.3f} = {clearance_inner:.3f} m "
+        f"{'≥' if clearance_inner >= sigma - _TOL else '<'} σ({sigma:.3f})"
+        f" → {'满足' if clearance_inner >= sigma - _TOL else '不满足'}",
         lookup_note,
+        verdict,
     ]
     res.verdict_lines += _attach_common_checks(res, bundle, r_inner_min=r_i)
     return res
@@ -400,11 +515,14 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
     deltaB = max(0.0, W - B_t)             # 外摆值 ΔB = Dmax − (R_m + B_t)
     sigma = INTERSECTION_RESERVE           # 5.2.1 可取 0.5m
 
-    # 判定（默认右转弯，5.2.1-1/-2；左转弯 5.2.1-3/-4 一并计算供参考）
+    # 判定（5.2.1）：右转 5.2.1-1/-2 用进口道总宽/右转可通行宽；左转 5.2.1-3/-4
+    # 用平面交叉物理区可通行宽度 W_section 与左转处可通行宽度 W_lturn。
     right_ok = ((entry_w - 2 * sigma) >= (B_t + deltaB) - _TOL) and \
                ((exit_w - 2 * sigma) >= W - _TOL)
-    left_ok = ((entry_w - sigma) >= (B_t + deltaB) - _TOL) and \
-              ((exit_w - sigma) >= W - _TOL)
+    W_section = ra.W_section if ra.W_section is not None else entry_w
+    W_lturn = ra.W_lturn if ra.W_lturn is not None else exit_w
+    left_ok = ((W_section - sigma) >= (B_t + deltaB) - _TOL) and \
+              ((W_lturn - sigma) >= W - _TOL)
     pass_ok = right_ok
 
     # 现有“所需最小出口转弯带”保留为参考量（不再作为唯一判据）
@@ -416,20 +534,48 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         "R_m": R_m, "W": W, "deltaB": deltaB, "W_en": entry_w,
         "W_turn": exit_w, "sigma": sigma, "B_t": B_t,
         "W2_min": w2_min, "turn_deg": turn_deg,
+        "W_section": W_section, "W_lturn": W_lturn,
+        "right_ok": right_ok, "left_ok": left_ok,
     }
     res.pass_ok = pass_ok
     res.verdict_lines = _vehicle_cargo_lines(bundle) + [
         "【弯道参数】",
         f"弯道类型：直角弯道（平面交叉转弯）；公路等级：{road.highway_grade}",
         f"入口宽度 W_en = {entry_w:.2f} m，出口宽度 W_turn = {exit_w:.2f} m，"
-        f"内角半径 = {ra.corner_radius:.2f} m",
+        f"交角 {turn_deg:.0f}°，内角半径 = {ra.corner_radius:.2f} m",
+        f"平面交叉物理区可通行宽度 W_section = {W_section:.2f} m；"
+        f"左转处可通行宽度 W_lturn = {W_lturn:.2f} m",
         f"横向预留空间 σ = {sigma:g} m；垂直净空 {road.vertical_clearance:.3f} m",
         "【理论分析】",
-        f"最内侧转弯半径 R_m = {R_m:.3f} m，扫空空间最大宽度 W = {W:.3f} m",
-        f"车货总宽度 B_t = {B_t:.3f} m，外摆值 ΔB = {deltaB:.3f} m",
-        f"右转判定(5.2.1)：W_en−2σ({entry_w - 2 * sigma:.3f}) ≥ B_t+ΔB"
-        f"({B_t + deltaB:.3f}) 且 W_turn−2σ({exit_w - 2 * sigma:.3f}) ≥ W({W:.3f})",
-        f"所需最小出口转弯带 W2_min ≈ {w2_min:.3f} m（参考量）",
+        "◆ 5.2.1 三要素：",
+        f"扫掠外径 R_max = R_o = {r_o:.3f} m；扫掠内径 R_i = {r_i:.3f} m",
+        f"最内侧转弯半径 R_m = R_i = {R_m:.3f} m",
+        f"扫空空间宽度 W = R_o − R_i = {r_o:.3f} − {r_i:.3f} = {W:.3f} m",
+        f"车货总宽度 B_t = max(挂车宽, 货宽) = max({bundle.trailer.width:.2f}, "
+        f"{bundle.cargo.width:.2f}) = {B_t:.3f} m",
+        f"外摆值 ΔB = max(W − B_t, 0) = max({W:.3f} − {B_t:.3f}, 0) = {deltaB:.3f} m",
+        f"横向预留空间 σ = {sigma:g} m（5.2.1）",
+        "◆ 右转判定（5.2.1-1/-2）：",
+        f"W_en − 2σ = {entry_w:.3f} − 2×{sigma:g} = {entry_w - 2 * sigma:.3f} m "
+        f"{'≥' if entry_w - 2 * sigma >= (B_t + deltaB) - _TOL else '<'} "
+        f"B_t+ΔB = {B_t + deltaB:.3f} m"
+        f"（W_en−2σ≥B_t+ΔB {'满足' if entry_w - 2 * sigma >= (B_t + deltaB) - _TOL else '不满足'}）",
+        f"W_turn − 2σ = {exit_w:.3f} − 2×{sigma:g} = {exit_w - 2 * sigma:.3f} m "
+        f"{'≥' if exit_w - 2 * sigma >= W - _TOL else '<'} W = {W:.3f} m"
+        f"（W_turn−2σ≥W {'满足' if exit_w - 2 * sigma >= W - _TOL else '不满足'}）",
+        f"→ 右转{'通过' if right_ok else '不通过'}",
+        "◆ 左转判定（5.2.1-3/-4）：",
+        f"W_section − σ = {W_section:.3f} − {sigma:g} = {W_section - sigma:.3f} m "
+        f"{'≥' if W_section - sigma >= (B_t + deltaB) - _TOL else '<'} "
+        f"B_t+ΔB = {B_t + deltaB:.3f} m"
+        f"（W_section−σ≥B_t+ΔB "
+        f"{'满足' if W_section - sigma >= (B_t + deltaB) - _TOL else '不满足'}）",
+        f"W_lturn − σ = {W_lturn:.3f} − {sigma:g} = {W_lturn - sigma:.3f} m "
+        f"{'≥' if W_lturn - sigma >= W - _TOL else '<'} W = {W:.3f} m"
+        f"（W_lturn−σ≥W {'满足' if W_lturn - sigma >= W - _TOL else '不满足'}）",
+        f"→ 左转{'通过' if left_ok else '不通过'}",
+        f"所需最小出口转弯带 W2_min = max(W, B_t+ΔB) + 2σ = "
+        f"max({W:.3f}, {B_t + deltaB:.3f}) + 2×{sigma:g} = {w2_min:.3f} m（参考量）",
     ]
     res.verdict_lines += _attach_common_checks(res, bundle, r_inner_min=R_m)
     return res

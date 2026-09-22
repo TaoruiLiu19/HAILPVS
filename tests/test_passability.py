@@ -16,7 +16,8 @@ from app.core.datamodel import (InputBundle, CargoParams, TrailerParams,
                                 TractorParams, RoadParams, ArcCorner,
                                 RightAngleCorner)
 from app.core.passability import run_scene
-from app.core.grade import classify, classify_bundle, TABLE_4_3_1_RMIN
+from app.core.grade import (classify, classify_bundle, TABLE_4_3_1,
+                            arch_lookup_apply)
 from app.core.kinematics import hydraulic_turn_radii
 from app.core.lateral import (side_slip_critical_v, overturn_critical_v,
                               parking_superelevation_ok)
@@ -89,7 +90,8 @@ def test_m3_highway_grade_stricter():
                                 grade="三级公路"))
     assert low.metrics["sigma"] == pytest.approx(0.25)
     assert high.metrics["sigma"] == pytest.approx(0.5)
-    assert high.metrics["lane_avail"] < low.metrics["lane_avail"]
+    # 横向空间宽度/路面宽度不再由 σ 双侧扣除（废止 lane-2σ 口径）
+    assert high.metrics["transverse_space_w"] == pytest.approx(low.metrics["transverse_space_w"])
 
 
 def test_m3_explicit_sigma_overrides_grade():
@@ -152,8 +154,21 @@ def test_m5_classify_bounds():
 
 
 def test_m5_table_radius():
-    assert TABLE_4_3_1_RMIN["A"] == 8.6
-    assert TABLE_4_3_1_RMIN["E"] is None   # 无表数据 → 回退验算/仿真
+    # 表4.3.1 双列数据：最小半径 / 最大扫空空间宽度
+    assert TABLE_4_3_1["A"]["min_radius"] == 11.0
+    assert TABLE_4_3_1["A"]["max_swept_width"] == 8.6
+    assert TABLE_4_3_1["B"]["min_radius"] == 15.0
+    assert TABLE_4_3_1["C"]["min_radius"] == 22.0
+    assert TABLE_4_3_1["D"]["min_radius"] == 28.0
+    assert TABLE_4_3_1["E"] is None   # 无表数据 → 回退验算/仿真
+
+
+def test_m5_lookup_dual_condition():
+    # 查表法 4.3.1：半径与通行空间宽度均大于表值 → pass；任一不满足 → fail
+    assert arch_lookup_apply("A", 20.0, 10.0, 5.0) == "pass"    # r>11, w>8.6
+    assert arch_lookup_apply("A", 10.0, 10.0, 5.0) == "fail"    # r≤11
+    assert arch_lookup_apply("A", 20.0, 6.0, 5.0) == "fail"     # 通行空间≤8.6
+    assert arch_lookup_apply("E", 50.0, 30.0, 5.0) == "fallback"  # E 无表数据
 
 
 # ---- M6: 液压挂车闭式解 ----
@@ -213,6 +228,59 @@ def test_m8_scene_lateral_runs():
     res = run_scene(_arc_bundle(lowbed=True, outer=30.0, lane=7.0))
     assert "Vhmax" in res.metrics
     assert isinstance(res.metrics["ok"], bool)
+
+
+# ---- P0-6: 垂直净空分场景阈值 ----
+def test_vertical_cross_structure_thresholds():
+    # 跨线构造物：间隙在 [0.05,0.10) 需措施但可通行；<0.05 不通过
+    ok = run_scene(_arc_bundle(lowbed=True, outer=30.0, lane=7.0,
+                               vertical=4.26))  # 总高4.2，间隙0.06
+    assert ok.metrics["vert_clearance_ok"] is True
+    bad = run_scene(_arc_bundle(lowbed=True, outer=30.0, lane=7.0,
+                                vertical=4.23))  # 间隙0.03 < 0.05
+    assert bad.metrics["vert_clearance_ok"] is False
+    assert bad.pass_ok is False
+
+
+def test_vertical_tunnel_threshold_stricter():
+    # 隧道顶部要求 ≥0.2：间隙0.15 应判不通过（比跨线0.05严格）
+    b = _arc_bundle(lowbed=True, outer=30.0, lane=7.0, vertical=4.35)
+    b.road.clearance_structure_type = "隧道"
+    res = run_scene(b)
+    assert res.metrics["vert_clearance_ok"] is False
+
+
+# ---- P0-4: 圆弧判定使用横向空间宽度（废止 lane-2σ）----
+def test_arc_uses_transverse_width():
+    b = _arc_bundle(lowbed=True, outer=30.0, lane=7.0)
+    res = run_scene(b)
+    assert "transverse_space_w" in res.metrics
+    assert "road_width" in res.metrics
+    assert "method" in res.metrics
+    assert res.metrics["road_width"] > 0
+
+
+# ---- P0-5: 左转使用 W_section / W_lturn ----
+def test_left_turn_uses_section_width():
+    b = InputBundle(
+        cargo=_cargo(), trailer=_trailer(), tractor=_tractor(),
+        road=RoadParams(road_type="直角弯道",
+                        right_angle=RightAngleCorner(entry_width=10.0,
+                                                     exit_width=10.0,
+                                                     corner_radius=0.0,
+                                                     intersection_angle_deg=90.0,
+                                                     W_section=6.0,
+                                                     W_lturn=7.0),
+                        vertical_clearance=7.5),
+        max_speed_kmh=10.0)
+    res = run_scene(b)
+    m = res.metrics
+    sigma = m["sigma"]
+    assert m["W_section"] == pytest.approx(6.0)
+    assert m["W_lturn"] == pytest.approx(7.0)
+    left_ok = ((m["W_section"] - sigma) >= (m["B_t"] + m["deltaB"]) - 1e-6) and \
+              ((m["W_lturn"] - sigma) >= m["W"] - 1e-6)
+    assert m["left_ok"] == left_ok
 
 
 # ---- 基准回归 ----

@@ -22,8 +22,27 @@ ACCEPTANCE_NOTE = (
 TURN_SAFE_CLEARANCE = 0.5        # 转弯通道宽度安全宽度(m)，B.1.1-1 / B.1.2-1 中的 0.5
 LATERAL_CLEARANCE_HIGH = 0.5     # 高速/一级/二级公路横向预留空间(m)，4.2.1
 LATERAL_CLEARANCE_LOW = 0.25     # 三级/四级公路横向预留空间(m)，4.2.1
-VERT_CLEARANCE_MARGIN = 0.1      # 垂直净空附加余量(m)
+VERT_CLEARANCE_MARGIN = 0.1      # 垂直净空附加余量(m)——仅用于普通跨线构造物/上跨桥“宜0.1”
 INTERSECTION_RESERVE = 0.5       # 平面交叉转弯单侧预留空间(m)，5.2.1 可取 0.5
+
+# ---- 垂直净空分场景阈值（P0-6：只做 H总+0.1 过于简化）----
+# 上跨桥/跨线构造物 6.4.1、竖曲线跨线 4.4.2：不宜 <0.10，不应 <0.05
+VERT_CROSS_STRUCTURE = {"desirable": 0.10, "minimum": 0.05}
+# 隧道 9.2.1
+TUNNEL_CROWN_CLEARANCE = 0.20    # 顶部距洞顶(含设备) ≥0.20
+TUNNEL_SIDE_CLEARANCE   = 0.50    # 距隧道侧壁(含检修道) ≥0.50
+TUNNEL_HIGH_REQ_BOTTOM  = 0.20    # 货物底部高于检修道顶面 ≥0.20
+TUNNEL_GROUND_CLEARANCE = 0.20    # 车/货底缘距路面 ≥0.20
+# 匝道 6.3.2：外廓边缘与护栏等设施预留，不宜 <0.50，不应 <0.25
+RAMP_CLEARANCE          = {"desirable": 0.50, "minimum": 0.25}
+
+# 净空场景划分：'跨线构造物'/'上跨桥'/'斜坡' 走跨线阈值；'隧道' 走隧道阈值；'匝道' 走匝道阈值
+VERT_SCENARIO = {
+    "跨线构造物": "cross",
+    "上跨桥": "cross",
+    "隧道": "tunnel",
+    "匝道": "ramp",
+}
 
 # 公路等级 → 横向预留空间 σ 映射（4.2.1）
 HIGHWAY_GRADES = ["高速公路", "一级公路", "二级公路", "三级公路", "四级公路"]

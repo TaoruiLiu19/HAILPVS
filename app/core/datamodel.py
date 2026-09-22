@@ -60,6 +60,11 @@ class RightAngleCorner(BaseModel):
     exit_width: float = Field(gt=0, description="出口宽(m)")
     corner_radius: float = Field(0.0, ge=0, description="弯道内半径(m)")
     intersection_angle_deg: float = Field(90.0, gt=0, lt=180)
+    # 5.2.1 左转专用可通行宽度。缺省时回退到入口/出口宽度（界面未显式给定时）。
+    W_section: float | None = Field(
+        None, ge=0, description="左转时平面交叉物理区可通行宽度(m)，5.2.1-3")
+    W_lturn: float | None = Field(
+        None, ge=0, description="平面交叉左转处可通行宽度(m)，5.2.1-4")
 
 
 class RoadParams(BaseModel):
@@ -71,6 +76,15 @@ class RoadParams(BaseModel):
     highway_grade: str = "三级公路"        # 4.2.1 确定横向预留空间 σ
     lateral_clearance: float | None = Field(
         None, ge=0, description="横向预留空间 σ(m)，显式给定则优先于按公路等级取值")
+    # 4.2.2 / 4.3.1 横向空间宽度相关（替代“lane − 2σ”的错误口径）
+    hard_shoulder_w: float = Field(0.0, ge=0, description="硬路肩宽度(m)")
+    left_edgeline_w: float = Field(0.0, ge=0, description="左侧路缘带宽度(m)")
+    median_type: str = Field("划线", description="对向分隔方式：物理隔离/划线，4.2.2")
+    has_curve_widening: bool = Field(False, description="是否有圆曲线加宽")
+    curve_widening_w: float = Field(0.0, ge=0, description="圆曲线加宽值(m)，4.3.1第2款")
+    # 垂直净空分场景（6.4.1 上跨桥 / 9.2.1 隧道 / 6.3.2 匝道 / 普通跨线构造物）
+    clearance_structure_type: str = Field(
+        "跨线构造物", description="上跨桥/隧道/匝道/跨线构造物，决定净空阈值")
 
     @model_validator(mode="after")
     def _check_geometry(self):

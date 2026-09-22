@@ -78,6 +78,7 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
     rows.append(("公路等级", m.get('highway_grade', '')))
     rows.append(("横向预留空间 σ (m)", f"{m.get('sigma', 0):.3f}"))
     rows.append(("大件运输尺寸级", m.get('size_grade', '')))
+    rows.append(("判定方法", m.get('method', '')))
     if res.scene == "arc":
         rows.append(("弯道类型", "圆弧弯道"))
         rows.append(("车辆所需最小弯道外半径 R_min (m)", f"{m.get('R_o',0):.3f}"))
@@ -85,8 +86,8 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
         rows.append(("车辆扫掠内径 R_i (m)", f"{m.get('R_i',0):.3f}"))
         rows.append(("扫空空间宽度 (m)", f"{m.get('W_needed',0):.3f}"))
         rows.append(("转弯通道宽度(含0.5m安全宽度) W (m)", f"{m.get('W',0):.3f}"))
-        rows.append(("路面宽度/横向空间宽度 (m)", f"{m.get('road_lane',0):.3f}"))
-        rows.append(("路面净宽(扣除两侧预留) (m)", f"{m.get('lane_avail',0):.3f}"))
+        rows.append(("路面宽度 (m)", f"{m.get('road_width',0):.3f}"))
+        rows.append(("横向空间宽度 (m)", f"{m.get('transverse_space_w',0):.3f}"))
         rows.append(("外缘净空 (m)", f"{m.get('clearance_outer',0):.3f}"))
         rows.append(("内缘净空 (m)", f"{m.get('clearance_inner',0):.3f}"))
         if "B1_2_Rin" in m:

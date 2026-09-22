@@ -36,5 +36,13 @@
   "right_exit_width": "14.0",
   "right_corner_radius": "6.0",
   "right_intersection_angle_deg": "90",
-  "saved_at": "2026-09-21 20:00:00"
+  "right_W_section": "18.5",
+  "right_W_lturn": "14.0",
+  "hard_shoulder_w": "0.0",
+  "left_edgeline_w": "0.0",
+  "median_type": "划线",
+  "has_curve_widening": "0",
+  "curve_widening_w": "0.0",
+  "clearance_structure_type": "跨线构造物",
+  "saved_at": "2026-09-22 10:20:00"
 }

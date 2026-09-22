@@ -3,9 +3,10 @@
 分级依据规范第 3.2.4 条“基于车货总体外廓尺寸的大件运输分级”（表3.2.4），
 按车货总体总长度、总宽度、总高度分别确定级别，取最高级。
 
-查表法依据第 4.3.1 条（圆曲线可通行性，表4.3.1）。表内数据为 OCR 复核后
-的最小半径值；当分级数据缺失（如 E 尺寸级最大扫空空间宽度）或圆曲线半径
-小于表值时，调用方应回退到附录 B 验算法 / 附录 C 仿真法。
+查表法依据第 4.3.1 条（圆曲线可通行性，表4.3.1）。表内"最小半径"与
+"最大扫空空间宽度"双列数据均已按规范复原；当分级数据缺失（E 尺寸级）或
+圆曲线半径 / 通行空间宽度小于等于表值时，调用方应回退到附录 B 验算法 /
+附录 C 仿真法（查表优先，非无条件覆盖）。
 """
 from __future__ import annotations
 
@@ -38,30 +39,33 @@ _LENGTH_HYDRAULIC = [
     (41.0, 45.0, "D"),
     (45.0, float("inf"), "E"),
 ]
-# 总宽度 (m)
+# 总宽度 (m)：A 下限 2.55（≤2.55 视为非超限车辆，取 A）
 _WIDTH_BANDS = [
+    (float("-inf"), 2.55, "A"),
     (2.55, 3.00, "A"),
     (3.00, 3.50, "B"),
     (3.50, 3.75, "C"),
     (3.75, 4.50, "D"),
     (4.50, float("inf"), "E"),
 ]
-# 总高度 (m)：A/B/C 上限 4.50，D 上限 5.00，E >5.00
+# 总高度 (m)：规范 3.2.4 中 A/B/C 共区 (4.00,4.50]，D (4.50,5.00]，E >5.00。
+# 区间内的子级（A/B/C）由长/宽维度在 classify() 取最高级时共同决定，
+# 此处高度维度按该区间的最高子级 C 计入（保守），保证 B 级由长度/宽度触发。
 _HEIGHT_BANDS = [
-    (float("-inf"), 4.00, "A"),
-    (4.00, 4.50, "C"),
+    (float("-inf"), 4.00, "A"),       # ≤4.00 非超限高度，取 A
+    (4.00, 4.50, "C"),                # (4.00,4.50] → A/B/C 共区，保守取 C
     (4.50, 5.00, "D"),
     (5.00, float("inf"), "E"),
 ]
 
-# 表4.3.1 圆曲线可通行性：最小半径 R_min (m)。
-# 最大扫空空间宽度列受 OCR 完整度限制未全复原，缺失项用 None（回退验算/仿真）。
-TABLE_4_3_1_RMIN = {
-    "A": 8.6,
-    "B": 11.2,
-    "C": 17.7,
-    "D": 20.2,
-    "E": None,
+# 表4.3.1 圆曲线可通行性（双列）：min_radius = 最小半径(m)，max_swept_width = 最大扫空空间宽度(m)。
+# 规范 4.3.1 第1款：圆曲线半径与通行空间宽度**均大于**表值才判满足；任一不满足或 E 级回退验算/仿真。
+TABLE_4_3_1 = {
+    "A": {"min_radius": 11.0, "max_swept_width": 8.6},
+    "B": {"min_radius": 15.0, "max_swept_width": 11.2},
+    "C": {"min_radius": 22.0, "max_swept_width": 17.7},
+    "D": {"min_radius": 28.0, "max_swept_width": 20.2},
+    "E": None,   # 表4.3.1 无 E 级数据 → 回退验算/仿真
 }
 
 
@@ -89,15 +93,30 @@ def classify_bundle(bundle: InputBundle) -> str:
 
 def arch_lookup_min_radius(grade: str):
     """表4.3.1 某级的最小半径。无数据（E）返回 None。"""
-    return TABLE_4_3_1_RMIN.get(grade)
+    row = TABLE_4_3_1.get(grade)
+    return row["min_radius"] if row else None
 
 
-def arch_lookup_apply(grade: str, curve_radius: float) -> bool | None:
-    """查表法 4.3.1.1：圆曲线半径 ≥ 表值即满足最小半径要求。
+def arch_lookup_min_swept_width(grade: str):
+    """表4.3.1 某级的最大扫空空间宽度。无数据（E）返回 None。"""
+    row = TABLE_4_3_1.get(grade)
+    return row["max_swept_width"] if row else None
 
-    返回 True（满足）/ False（不满足）/ None（该级无表数据，需回退验算）。
+
+def arch_lookup_apply(grade: str, curve_radius: float,
+                      transverse_space_w: float, swept_w: float) -> str:
+    """查表法 4.3.1 第1款：圆曲线半径与通行空间宽度**均大于**表值才判满足。
+
+    返回 "pass"（查表命中，半径与通行空间宽度双超表值，直接满足）
+        / "fail"（任一不满足，按附录B验算/附录C仿真）
+        / "fallback"（该级无表数据，如 E 级，回退验算/仿真）。
     """
-    r_min = arch_lookup_min_radius(grade)
-    if r_min is None:
-        return None
-    return curve_radius > r_min + 1e-9
+    row = TABLE_4_3_1.get(grade)
+    if row is None:
+        return "fallback"
+    r_ok = curve_radius > row["min_radius"] + 1e-9
+    w_ok = (transverse_space_w > row["max_swept_width"] + 1e-9
+            and swept_w < transverse_space_w)
+    if r_ok and w_ok:
+        return "pass"
+    return "fail"
