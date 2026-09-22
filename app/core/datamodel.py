@@ -50,7 +50,7 @@ class TractorParams(BaseModel):
 
 class ArcCorner(BaseModel):
     """圆弧弯道：R_min = 最大扫空半径。"""
-    outer_radius: float = Field(gt=0, description="弯道中线/外半径(m)")
+    outer_radius: float = Field(gt=0, description="道路外半径(m)，内半径 = 外半径 − 车道宽")
     lane_width: float = Field(gt=0, description="车道宽度(m)")
 
 
@@ -71,7 +71,6 @@ class RoadParams(BaseModel):
     highway_grade: str = "三级公路"        # 4.2.1 确定横向预留空间 σ
     lateral_clearance: float | None = Field(
         None, ge=0, description="横向预留空间 σ(m)，显式给定则优先于按公路等级取值")
-    superelevation: float = Field(0.02, ge=0, description="圆曲线超高值 i_h")
 
     @model_validator(mode="after")
     def _check_geometry(self):

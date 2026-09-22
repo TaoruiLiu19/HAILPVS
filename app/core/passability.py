@@ -113,7 +113,7 @@ def _lateral_check(bundle: InputBundle, r_min: float):
     v = bundle.max_speed_kmh
     mu = PAD_FRICTION.get(cargo.cargo_bearing, 0.4)
     cg_h = tl.deck_height + cargo.cg_height
-    ih = road.superelevation
+    ih = DEFAULT_SUPERELEVATION            # 超高按默认值计入横向稳定性(B.2)
     ok, vh, vch, vcv, p_ok, msg = _lateral.lateral_stability(
         r_min, v, tl.track_width, cg_h, ih, mu)
     return {
@@ -287,8 +287,7 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         "【弯道参数】",
         f"弯道类型：圆弧弯道；公路等级：{road.highway_grade}",
         f"道路外半径 R_o = {r_out:.3f} m，内半径 R_i = {r_in:.3f} m，车道宽 {lane:.3f} m",
-        f"横向预留空间 σ = {sigma:.3f} m；垂直净空 {road.vertical_clearance:.3f} m；"
-        f"超高 {road.superelevation:.3f}",
+        f"横向预留空间 σ = {sigma:.3f} m；垂直净空 {road.vertical_clearance:.3f} m",
         "【理论分析】",
         f"车辆所需最小弯道外半径 R_min = {r_o:.3f} m（道路外半径 {r_out:.3f} m）",
         f"车辆扫掠外径 R_o = {r_o:.3f} m，内径 R_i = {r_i:.3f} m",
@@ -424,8 +423,7 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         f"弯道类型：直角弯道（平面交叉转弯）；公路等级：{road.highway_grade}",
         f"入口宽度 W_en = {entry_w:.2f} m，出口宽度 W_turn = {exit_w:.2f} m，"
         f"内角半径 = {ra.corner_radius:.2f} m",
-        f"横向预留空间 σ = {sigma:g} m；垂直净空 {road.vertical_clearance:.3f} m；"
-        f"超高 {road.superelevation:.3f}",
+        f"横向预留空间 σ = {sigma:g} m；垂直净空 {road.vertical_clearance:.3f} m",
         "【理论分析】",
         f"最内侧转弯半径 R_m = {R_m:.3f} m，扫空空间最大宽度 W = {W:.3f} m",
         f"车货总宽度 B_t = {B_t:.3f} m，外摆值 ΔB = {deltaB:.3f} m",

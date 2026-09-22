@@ -16,7 +16,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Arc
 
-from config import PLOT_DPI
+from config import PLOT_DPI, TURN_SAFE_CLEARANCE
 from ..core.passability import SweepScenarioResult
 
 # —— CAD 风格配色：白底 / 黑主结构 / 蓝构件与构造线 / 红关键点 ——
@@ -72,18 +72,41 @@ def _crosshair(ax, x, y, arm=1.8):
     ax.plot([x, x], [y - arm, y + arm], color=CENTER_COLOR, linewidth=1.2, zorder=5)
 
 
-def _annotate_radius(ax, center, radius, span_deg, label, side):
+def _annotate_radius(ax, center, radius, span_deg, label, side, road=None):
     """构造圆弧 + 引出线半径标注（仿 R13122 / R4465）。
 
     span_deg 为圆弧张角（度）：从弯道入口(0°)铺到弯道转角，使构造圆弧
     贴合弯道实际转弯段、不伸进出入弯直道。side 取 'out'/'in'，决定文字
     落在弧线外侧（开阔区）还是内侧（圆心岛区）。
+
+    传入 road 几何时，圆弧只画出落在道路范围内的连续段：这样内半径圆弧
+    落在直角弯内角空腔（道路L形切掉的口袋）里的部分会被裁掉，避免图上
+    出现“半径标注圆越过道路边界”的误导。
     """
     cxx, cyy = center
     a = math.radians(span_deg)
-    ax.add_patch(Arc((cxx, cyy), 2 * radius, 2 * radius,
-                     theta1=0.0, theta2=span_deg,
-                     color=DIM_COLOR, linewidth=0.9, zorder=3))
+    if road is not None:
+        from shapely.geometry import Point
+        n = 240
+        run_x, run_y = [], []
+        for i in range(n + 1):
+            d = span_deg * i / n
+            px = cxx + radius * math.cos(math.radians(d))
+            py = cyy + radius * math.sin(math.radians(d))
+            if road.covers(Point(px, py)):
+                run_x.append(px)
+                run_y.append(py)
+            else:
+                if len(run_x) >= 2:
+                    ax.plot(run_x, run_y, color=DIM_COLOR,
+                            linewidth=0.9, zorder=3)
+                run_x, run_y = [], []
+        if len(run_x) >= 2:
+            ax.plot(run_x, run_y, color=DIM_COLOR, linewidth=0.9, zorder=3)
+    else:
+        ax.add_patch(Arc((cxx, cyy), 2 * radius, 2 * radius,
+                         theta1=0.0, theta2=span_deg,
+                         color=DIM_COLOR, linewidth=0.9, zorder=3))
     ex = cxx + radius * math.cos(a)
     ey = cyy + radius * math.sin(a)
     offset = 2.4 if side == "out" else -2.4
@@ -94,6 +117,63 @@ def _annotate_radius(ax, center, radius, span_deg, label, side):
             ha="center", va="center", family="Microsoft YaHei",
             bbox=dict(facecolor="white", edgecolor="none", pad=1.5),
             zorder=4)
+
+
+def _annotate_band(ax, center, r_in, r_out, ang_deg, label):
+    """径向尺寸线：在 ang_deg 上从 r_in 到 r_out 画双向箭头，标注扫空/转弯通道宽度 W。"""
+    cxx, cyy = center
+    a = math.radians(ang_deg)
+
+    def _pt(rr):
+        return (cxx + rr * math.cos(a), cyy + rr * math.sin(a))
+    p0, p1 = _pt(r_in), _pt(r_out)
+    ax.annotate("", xy=p1, xytext=p0,
+                arrowprops=dict(arrowstyle="<->", color=DIM_COLOR, lw=1.0,
+                                shrinkA=0, shrinkB=0), zorder=3)
+    mx, my = _pt((r_in + r_out) / 2.0)
+    lx, ly = _pt(r_out + 2.6)
+    ax.plot([mx, lx], [my, ly], color=DIM_COLOR, linewidth=0.7, zorder=3)
+    ax.text(lx, ly, label, color=DIM_COLOR, fontsize=9,
+            ha="center", va="center", family="Microsoft YaHei",
+            bbox=dict(facecolor="white", edgecolor="none", pad=1.5), zorder=4)
+
+
+def _safety_band(ax, center, r_out, span_deg, safe_w):
+    """安全宽度 +0.5：在扫掠外缘外画一圈虚线弧并引出标注，标示转弯通道宽度外边界。"""
+    cxx, cyy = center
+    radius = r_out + safe_w
+    ax.add_patch(Arc((cxx, cyy), 2 * radius, 2 * radius,
+                     theta1=0.0, theta2=span_deg,
+                     color=DIM_COLOR, linewidth=0.8, linestyle=(0, (4, 3)),
+                     zorder=3))
+    a = math.radians(span_deg)
+    lx = cxx + (radius + 1.8) * math.cos(a)
+    ly = cyy + (radius + 1.8) * math.sin(a)
+    ex = cxx + radius * math.cos(a)
+    ey = cyy + radius * math.sin(a)
+    ax.plot([lx, ex], [ly, ey], color=DIM_COLOR, linewidth=0.7, zorder=3)
+    ax.text(lx, ly, f"安全宽度 +{safe_w:g} m", color=DIM_COLOR, fontsize=8.5,
+            ha="center", va="center", family="Microsoft YaHei",
+            bbox=dict(facecolor="white", edgecolor="none", pad=1.2), zorder=4)
+
+
+def _annotate_swing(ax, center, r_m, r_o, turn_deg, delta_b):
+    """外摆值 ΔB 标注：在扫掠带外缘、近入口侧引线标出外摆值（图5.2.1）。
+
+    放在弯道起点附近（小角度），避免与末端 R_o 标注重叠。
+    """
+    cxx, cyy = center
+    a = math.radians(max(8.0, turn_deg * 0.16))
+    rad = r_o  # 落在扫掠外缘
+    ex = cxx + rad * math.cos(a)
+    ey = cyy + rad * math.sin(a)
+    lx = cxx + (rad + 3.0) * math.cos(a)
+    ly = cyy + (rad + 3.0) * math.sin(a)
+    ax.plot([lx, ex], [ly, ey], color=DIM_COLOR, linewidth=0.7, zorder=3)
+    ax.plot(ex, ey, "+", color=DIM_COLOR, markersize=6, mew=0.8, zorder=3)
+    ax.text(lx, ly, f"外摆值 ΔB = {delta_b:.2f} m", color=DIM_COLOR, fontsize=8.5,
+            ha="center", va="center", family="Microsoft YaHei",
+            bbox=dict(facecolor="white", edgecolor="none", pad=1.2), zorder=4)
 
 
 def _rect_len_width(poly):
@@ -151,10 +231,32 @@ def draw_sweep_view(res: SweepScenarioResult, out_path, dpi=PLOT_DPI,
         else float(metrics.get("turn_deg", _RA_TURN_DEG))
     r_o = float(metrics.get("R_o", 0.0) or 0.0)
     r_i = float(metrics.get("R_i", 0.0) or 0.0)
+    road_geo = res.road if scene == "right_angle" else None
     if r_o > 0.5:
-        _annotate_radius(ax, center, r_o, turn_deg, f"R_o = {r_o:.3f} m", "out")
+        _annotate_radius(ax, center, r_o, turn_deg, f"R_o = {r_o:.3f} m",
+                         "out", road_geo)
     if r_i > 0.5:
-        _annotate_radius(ax, center, r_i, turn_deg, f"R_i = {r_i:.3f} m", "in")
+        r_i_label = (f"R_m(最内侧) = {r_i:.3f} m" if scene == "right_angle"
+                     else f"R_i = {r_i:.3f} m")
+        _annotate_radius(ax, center, r_i, turn_deg, r_i_label, "in", road_geo)
+
+    # —— 规范图面标注补充（图5.2.1 / 图B.1.1：转弯通道宽度W、安全带宽、ΔB）——
+    mid_ang = turn_deg * 0.5
+    if scene == "arc":
+        swept_w = float(metrics.get("W_swept", 0.0) or 0.0)
+        if r_i > 0.5 and r_o > 0.5 and swept_w > 0:
+            _annotate_band(ax, center, r_i, r_o, mid_ang,
+                           f"扫空宽度 W_s = {swept_w:.2f} m")
+        if r_o > 0.5 and TURN_SAFE_CLEARANCE > 0:
+            _safety_band(ax, center, r_o, turn_deg * 0.2, TURN_SAFE_CLEARANCE)
+    else:  # right_angle
+        w = float(metrics.get("W", 0.0) or 0.0)
+        db = float(metrics.get("deltaB", 0.0) or 0.0)
+        if r_i > 0.5 and r_o > 0.5 and w > 0:
+            _annotate_band(ax, center, r_i, r_o, mid_ang,
+                           f"扫空空间宽度 W = {w:.2f} m")
+        if r_o > 0.5 and db > 0:
+            _annotate_swing(ax, center, r_i, r_o, turn_deg, db)
 
     # Layer 5: 检验结论 + 图例（左下角）
     from matplotlib.lines import Line2D
@@ -182,8 +284,10 @@ def draw_sweep_view(res: SweepScenarioResult, out_path, dpi=PLOT_DPI,
         Line2D([0], [0], color=VEHICLE_COLOR, lw=1.1, label="车辆轮廓（挂车 / 牵引车）"),
         Line2D([0], [0], color=CARGO_COLOR, lw=1.2, label="货物轮廓（超宽 / 超长凸出）"),
         Line2D([0], [0], color=DIM_COLOR, lw=0.9, label="转弯扫掠半径"),
-        Line2D([0], [0], marker='+', color=CENTER_COLOR, ls='none', markersize=8,
+        Line2D([0], [0], color=CENTER_COLOR, ls='none', marker='+', markersize=8,
                label="转弯圆心（车辆绕其转弯）"),
+        Line2D([0], [0], color=DIM_COLOR, lw=1.0, ls="-",
+               label="尺寸标注（扫空宽度 W / 安全宽度 +0.5 / 外摆值 ΔB）"),
     ]
     from matplotlib.font_manager import FontProperties
     ax.legend(handles=handles, loc="lower left", title="图　例",

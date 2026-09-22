@@ -16,7 +16,7 @@ from PyQt5.QtGui import QPixmap
 
 from config import (APP_NAME, APP_VERSION, ROAD_TYPES, TRAILER_TYPES,
                     ACCEPTANCE_NOTE, EXPORT_PWD, MODEL_SUFFIX,
-                    HIGHWAY_GRADES, DEFAULT_SUPERELEVATION)
+                    HIGHWAY_GRADES)
 try:
     from config import PAD_ITEMS
 except ImportError:
@@ -66,7 +66,7 @@ _TRACTOR_FIELDS = [
     ("鞍座至后轴距离(m)", "tr_fifth_wheel_pos", "fifth_wheel_pos", True),
 ]
 _ARC_FIELDS = [
-    ("弯道中线/外半径(m)", "outer_radius", True),
+    ("道路外半径(m)", "outer_radius", True),
     ("车道宽度(m)", "lane_width", True),
 ]
 _RIGHT_FIELDS = [
@@ -293,9 +293,6 @@ class MainWindow(QMainWindow):
         g_cond, f_cond = _make_form_group("3. 运行工况与道路等级")
         self.cmb_grade = _new_combo(HIGHWAY_GRADES, "三级公路")
         f_cond.addRow(_row_label("公路等级："), self.cmb_grade)
-        ed = _new_edit(str(DEFAULT_SUPERELEVATION))
-        self.edits["superelevation"] = ed
-        f_cond.addRow(_row_label("圆曲线超高 i_h："), ed)
         ed = _new_edit("10.0")
         self.edits["max_speed_kmh"] = ed
         f_cond.addRow(_row_label("最高行驶速度(km/h)："), ed)
@@ -366,13 +363,12 @@ class MainWindow(QMainWindow):
         )
         road_type = self.cmb_road.currentText()
         grade = self.cmb_grade.currentText()
-        superelevation = self._f("superelevation")
         if road_type == "圆弧弯道":
             road = RoadParams(road_type=road_type,
                               arc=ArcCorner(outer_radius=self._f_arc("outer_radius"),
                                             lane_width=self._f_arc("lane_width")),
                               vertical_clearance=self._f("vertical_clearance"),
-                              highway_grade=grade, superelevation=superelevation)
+                              highway_grade=grade)
         else:
             road = RoadParams(road_type=road_type,
                               right_angle=RightAngleCorner(
@@ -381,7 +377,7 @@ class MainWindow(QMainWindow):
                                   corner_radius=self._f_right("corner_radius"),
                                   intersection_angle_deg=self._f_right("intersection_angle_deg")),
                               vertical_clearance=self._f("vertical_clearance"),
-                              highway_grade=grade, superelevation=superelevation)
+                              highway_grade=grade)
         return InputBundle(cargo=cargo, trailer=trailer, tractor=tractor, road=road,
                            max_speed_kmh=self._f("max_speed_kmh"))
 
@@ -449,7 +445,6 @@ class MainWindow(QMainWindow):
         d["trailer_type"] = self.cmb_trailer_type.currentText()
         d["road_type"] = self.cmb_road.currentText()
         d["highway_grade"] = self.cmb_grade.currentText()
-        d["superelevation"] = self.edits["superelevation"].text()
         d["vertical_clearance"] = self._f("vertical_clearance")
         for k, ed in self._arc_edits.items():
             d["arc_" + k] = ed.text()
@@ -473,8 +468,6 @@ class MainWindow(QMainWindow):
             self.cmb_road.setCurrentText(str(d["road_type"]))
         if "highway_grade" in d:
             self.cmb_grade.setCurrentText(str(d["highway_grade"]))
-        if "superelevation" in d:
-            self.edits["superelevation"].setText(str(d["superelevation"]))
         for k, ed in self._arc_edits.items():
             if "arc_" + k in d:
                 ed.setText(str(d["arc_" + k]))

@@ -169,6 +169,22 @@ def test_m6_hydraulic_radius_grows_with_axles():
     assert hydraulic_turn_radii(b)["W"] == pytest.approx(1.5)
 
 
+def test_m6_hydraulic_Lwheel_is_axle_spacing_not_track():
+    # 规范 B.1.2-2/-4：R = L轮挂·(Na−1)/(2tanθ)，L轮挂 取纵向轴距。
+    # 轮距 track_width 变化不应影响转弯半径；轴距 axle_spacing 变化才应影响。
+    base = _arc_bundle(lowbed=False, axle_count=4, axle_spacing=1.5, track=2.9)
+    r0 = hydraulic_turn_radii(base)
+    wide = _arc_bundle(lowbed=False, axle_count=4, axle_spacing=1.5, track=5.0)
+    r_wide = hydraulic_turn_radii(wide)
+    long = _arc_bundle(lowbed=False, axle_count=4, axle_spacing=3.0, track=2.9)
+    r_long = hydraulic_turn_radii(long)
+    # 轮距不影响（修复前会错误触发）
+    assert r_wide["R_in"] == pytest.approx(r0["R_in"], abs=1e-9)
+    assert r_wide["R_out"] == pytest.approx(r0["R_out"], abs=1e-9)
+    # 轴距影响（首末轴间距展开）
+    assert r_long["R_in"] > r0["R_in"]
+
+
 # ---- M7: 垂直净空 ----
 def test_m7_vertical_clearance():
     ok = run_scene(_arc_bundle(lowbed=True, outer=30.0, lane=7.0, vertical=7.5))
