@@ -56,14 +56,15 @@ def _arc_bundle(lowbed=True, outer=30.0, lane=7.0, grade="三级公路",
 
 # ---- M1: 0.5m 安全宽度 ----
 def test_m1_safety_clearance_flips_judgement():
-    # 液压挂车 B.1.2 使扫空宽度 = 轴距 d = 5.0，转弯通道 = 5.0+0.5 = 5.5
+    # 液压挂车 B.1.2：扫空宽度 = d = L轮挂·(Na−1) = 5.0×(3−1) = 10.0，
+    # 转弯通道 = 10.0+0.5 = 10.5
     b = _arc_bundle(lowbed=False, outer=30.0, lane=5.2,
                     lateral_clearance=0.0, axle_spacing=5.0)
     res = run_scene(b)
     swept = res.metrics["W_needed"]
-    assert swept >= 5.0 - 1e-6
+    assert swept >= 10.0 - 1e-6
     assert abs(res.metrics["W"] - (swept + 0.5)) < 1e-6          # 计入安全宽度
-    assert res.metrics["turn_channel_w"] > res.metrics["road_lane"]  # 5.5 > 5.2
+    assert res.metrics["turn_channel_w"] > res.metrics["road_lane"]  # 10.5 > 5.2
     assert res.pass_ok is False                                    # 判定为不通过
 
 
@@ -177,11 +178,14 @@ def test_m6_hydraulic_radius_grows_with_axles():
              for na in range(2, 9)]
     rin = [r["R_in"] for r in radii]
     rout = [r["R_out"] for r in radii]
-    assert all(rin[i] < rin[i + 1] for i in range(len(rin) - 1))    # 单调不减
-    assert all(rout[i] < rout[i + 1] for i in range(len(rout) - 1))
-    # B.1.2-6 扫空宽度 = 轴距 d
+    # 轴数不影响转向角(限45°)同时首末轴距项与 (D总−d)/2 相抵 ⇒ R_in = D总/2 恒定
+    assert all(abs(rin[i] - rin[0]) < 1e-9 for i in range(len(rin) - 1))
+    assert all(rout[i] < rout[i + 1] for i in range(len(rout) - 1))   # R_out 单调增
+    # B.1.2-6 扫空宽度 W = d = 首末轴距 = L轮挂·(Na−1)
     b = _arc_bundle(lowbed=False, axle_count=4, axle_spacing=1.5)
-    assert hydraulic_turn_radii(b)["W"] == pytest.approx(1.5)
+    r = hydraulic_turn_radii(b)
+    assert r["W"] == pytest.approx(1.5 * (4 - 1))
+    assert r["R_out"] - r["R_in"] == pytest.approx(4.5)
 
 
 def test_m6_hydraulic_Lwheel_is_axle_spacing_not_track():
@@ -196,8 +200,9 @@ def test_m6_hydraulic_Lwheel_is_axle_spacing_not_track():
     # 轮距不影响（修复前会错误触发）
     assert r_wide["R_in"] == pytest.approx(r0["R_in"], abs=1e-9)
     assert r_wide["R_out"] == pytest.approx(r0["R_out"], abs=1e-9)
-    # 轴距影响（首末轴间距展开）
-    assert r_long["R_in"] > r0["R_in"]
+    # 轴距影响：R_out 与扫空宽度 W=d 随之增大
+    assert r_long["R_out"] > r0["R_out"]
+    assert r_long["W"] > r0["W"]
 
 
 # ---- M7: 垂直净空 ----

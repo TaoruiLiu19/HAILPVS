@@ -15,7 +15,6 @@ from shapely.geometry import Polygon, MultiPolygon, box
 from shapely.ops import unary_union
 
 from config import (TURN_SAFE_CLEARANCE, LATERAL_CLEARANCE_BY_GRADE,
-                    INTERSECTION_RESERVE,
                     HIGHWAY_GRADES, DEFAULT_SUPERELEVATION, PAD_FRICTION, g,
                     VERT_CROSS_STRUCTURE, TUNNEL_CROWN_CLEARANCE,
                     TUNNEL_SIDE_CLEARANCE, TUNNEL_HIGH_REQ_BOTTOM,
@@ -513,7 +512,7 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
     W = swept_w                            # 扫空空间最大宽度（B.1.2-6 口径）
     B_t = max(bundle.trailer.width, bundle.cargo.width)  # 车货总宽度
     deltaB = max(0.0, W - B_t)             # 外摆值 ΔB = Dmax − (R_m + B_t)
-    sigma = INTERSECTION_RESERVE           # 5.2.1 可取 0.5m
+    sigma = _effective_sigma(bundle)       # 5.2.1-1 横向预留空间，按公路等级（4.2.1）
 
     # 判定（5.2.1）：右转 5.2.1-1/-2 用进口道总宽/右转可通行宽；左转 5.2.1-3/-4
     # 用平面交叉物理区可通行宽度 W_section 与左转处可通行宽度 W_lturn。

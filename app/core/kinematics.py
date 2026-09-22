@@ -186,28 +186,28 @@ def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None):
     转动中心做圆周运动：
       R_in  = L轮挂·(Na−1)/(2·tanθ) + (D总−d)/2        式(B.1.2-4)
       R_out = L轮挂·(Na−1)/(2·tanθ) + (D总+d)/2        式(B.1.2-5)
-      W     = R_out − R_in                               式(B.1.2-6)
-    式中 L轮挂 为挂车纵向轴距（首末轴间距除以轴数差，(Na−1)·L轮挂 即首末轴
-    总间距），取值对应数据模型里的 axle_spacing（轴距），而非 track_width
-    （横向轮距）。θ 为第一轴线内侧轮胎转向角，受最大转向角与司机实操限制
-    保守取合理值。返回字典：R_in/R_out(车货总体最内/最外转弯半径)、W(扫空
-    空间宽度)、base、theta_deg、W_tire_in(内轮半径)。
+      W     = R_out − R_in = d                           式(B.1.2-6)
+    式中 L轮挂 为相邻轴线间距（取数据模型 axle_spacing），首末轴间距
+    = L轮挂·(Na−1)；d 为规范"液压悬挂挂车轴距"，即首末轴间距 = L轮挂·(Na−1)，
+    与 base 中展开的首末轴间距同量纲。θ 为第一轴线内侧轮胎转向角，受
+    最大转向角约束保守取 45° 限值。返回字典：R_in/R_out(车货总体最内/最外
+    转弯半径)、W(扫空空间宽度)、base、theta_deg、W_tire_in(内轮半径)。
     """
     import math
     tl = bundle.trailer
     tr = bundle.tractor
     na = max(int(tl.axle_count), 2)
-    d = tl.axle_spacing
-    l_wheel = tl.axle_spacing              # L轮挂：纵向轴距（首末轴间距按轴数差展开）
+    l_wheel = tl.axle_spacing              # L轮挂：相邻轴线间距
+    d = l_wheel * (na - 1)                 # d：首末轴间距 = L轮挂·(Na−1)（规范"挂车轴距"）
     d_total = tl.length                     # D总：液压悬挂挂车总长度
     theta_max = math.radians(min(
         getattr(tr, "max_steering_angle_deg", 45.0), 45.0))
     theta = turn_angle_theta if turn_angle_theta is not None else theta_max
     theta = max(1e-4, math.radians(min(math.degrees(theta), 45.0)))
-    base = l_wheel * (na - 1) / (2.0 * math.tan(theta))
+    base = l_wheel * (na - 1) / (2.0 * math.tan(theta))   # = d/(2·tanθ)
     r_in = base + (d_total - d) / 2.0       # B.1.2-4
     r_out = base + (d_total + d) / 2.0      # B.1.2-5
-    w_swept = r_out - r_in                  # B.1.2-6 = d（按规范公式）
+    w_swept = r_out - r_in                  # B.1.2-6 = d（首末轴间距）
     return {
         "R_in": r_in, "R_out": r_out, "W": w_swept,
         "base": base, "theta_deg": math.degrees(theta),
