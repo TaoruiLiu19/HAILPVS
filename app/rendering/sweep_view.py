@@ -79,30 +79,39 @@ def _crosshair(ax, x, y, arm=1.8):
 
 
 def _plot_steered_axle(ax, cx, cy, psi, delta_deg, half_track, locked,
-                       color=AXLE_COLOR):
-    """绘制液压车一根轴：轴段 + 两侧按 δ 偏转的轮胎实体（第六章图式）。
+                       color=AXLE_COLOR, n_tires=8):
+    """绘制液压车一根轴：轴段 + 两侧按 δ 偏转的多轮胎实体（第六章图式）。
 
     cx/cy 为轴中点；psi 为车板航向；delta_deg 为该轴转向角（首/末朝瞬心偏转、
-    闭锁轴保持 ψ 平行即 δ=0）。half_track 为轮距半宽。轮胎沿偏转方向画小矩形。
+    闭锁轴保持 ψ 平行即 δ=0）。half_track 为轮距半宽。n_tires 为该轴轮胎数，
+    沿轴横向均布于轮距上，每个轮胎沿偏转方向画小矩形（两侧均分）。
     """
-    tire_len, tire_wid = 1.1, 0.34           # 轮胎实体尺寸（m，示意）
+    tire_len = 1.1                        # 轮胎实体长度（m，沿滚动方向示意）
     ca, sa = math.cos(psi), math.sin(psi)
+    nx, ny = -sa, ca                       # 横向(轴)方向
     # 轴段：垂直于车板纵轴
-    nx, ny = -sa, ca
     ax.plot([cx - nx * half_track, cx + nx * half_track],
             [cy - ny * half_track, cy + ny * half_track],
             color=color, linewidth=1.0, zorder=4)
     da = math.radians(delta_deg)
-    tca, tsa = math.cos(psi + da), math.sin(psi + da)    # 轮胎方向(受 δ 偏转)
+    tca, tsa = math.cos(psi + da), math.sin(psi + da)   # 轮胎方向(受 δ 偏转)
+    # 每侧轮胎数；沿轴横向均布以 fit 轮距
+    per_side = int(n_tires) // 2
+    if per_side < 1:
+        per_side = 1
     for sgn in (-1.0, 1.0):
-        wx = cx + sgn * nx * half_track
-        wy = cy + sgn * ny * half_track
-        hx, hy = tire_len / 2.0, tire_wid / 2.0
-        corners = [(wx + (-hx * tca - -hy * -tsa), wy + (-hx * tsa + -hy * tca)),
-                   (wx + (hx * tca - -hy * -tsa), wy + (hx * tsa + -hy * tca)),
-                   (wx + (hx * tca - hy * tsa), wy + (hx * tsa + hy * tca)),
-                   (wx + (-hx * tca - hy * tsa), wy + (-hx * tsa + hy * tca))]
-        _plot_ring(ax, corners, color, 1.0)
+        for k in range(per_side):
+            # 该侧第 k 个轮胎的横向位置（自轴中点向该侧，1..per_side 等分拟合半轮距）
+            frac = (k + 0.5) / per_side
+            wx = cx + sgn * nx * half_track * frac
+            wy = cy + sgn * ny * half_track * frac
+            tire_wid = 2.0 * half_track / per_side * 0.85   # 轮胎宽占比该排间距
+            hx, hy = tire_len / 2.0, tire_wid / 2.0
+            corners = [(wx + (-hx * tca - -hy * -tsa), wy + (-hx * tsa + -hy * tca)),
+                       (wx + (hx * tca - -hy * -tsa), wy + (hx * tsa + -hy * tca)),
+                       (wx + (hx * tca - hy * tsa), wy + (hx * tsa + hy * tca)),
+                       (wx + (-hx * tca - hy * tsa), wy + (-hx * tsa + hy * tca))]
+            _plot_ring(ax, corners, color, 1.0)
     if locked:
         ax.text(cx + 2 * nx * half_track, cy + 2 * ny * half_track, "闭锁",
                 color=LOCKED_TEXT_COLOR, fontsize=7, ha="center", va="center",
@@ -268,8 +277,10 @@ def draw_sweep_view(res: SweepScenarioResult, out_path, dpi=PLOT_DPI,
         # 液压车轴线层（仅当此帧携带 axle_geoms）
         if axle_geoms and axle_geoms.get("axles"):
             psi = axle_geoms.get("psi", 0.0)
+            n_tires = int(axle_geoms.get("n_tires") or 8)
             for (aidx, axc, axy, dd, halft, locked) in axle_geoms["axles"]:
-                _plot_steered_axle(ax, axc, axy, psi, dd, halft, locked)
+                _plot_steered_axle(ax, axc, axy, psi, dd, halft, locked,
+                                   n_tires=n_tires)
         # 货物轮廓（始终显示）
         _plot_ring(ax, list(cargo_geom.exterior.coords), CARGO_COLOR, 1.2)
         ax.plot([_x], [_y], "o", color=VEHICLE_COLOR, markersize=3, zorder=4)

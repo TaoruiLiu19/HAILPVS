@@ -245,6 +245,65 @@ def test_b12_theta_upperbound():
     assert math.isfinite(r["R_in"]) and math.isfinite(r["R_out"]) and r["R_in"] > 0
 
 
+def test_axle_steering_geoms_positions_precise():
+    # 轴位精确到瞬心/车板坐标：第 i 轴距车板中心前向偏移 = length/2 − front_overhang
+    # − (i−1)·spacing。front_overhang=2 时首轴应前移 length/2−2=4，末轴(length/2−2−3·spacing)
+    # 由 front_overhang / coupling 唯一决定（D7/D8）。
+    tl = _h_trailer(axle_count=4, axle_spacing=1.5, length=12.0,
+                    front_overhang=2.0)
+    ax = axle_steering_geoms(0.0, 0.0, 0.0, tl, 10.0, na=4)
+    # psi=0 → 前向=+x；首轴 cx = 0 + (6−2−0) = 4.0
+    first = next(a for a in ax if a[0] == 1)
+    assert first[1] == pytest.approx(6.0 - 2.0, abs=1e-9)
+    last = next(a for a in ax if a[0] == 4)
+    assert last[1] == pytest.approx(6.0 - 2.0 - 3 * 1.5, abs=1e-9)
+
+
+def test_axle_tire_count_in_frames():
+    # 每帧 axle_geoms 带 n_tires（液压轴线每轴 8 轮胎），供多轮胎实体绘制
+    tl = _h_trailer(axle_count=4)
+    b12 = hydraulic_turn_radii(_h_bundle(tl))
+    frames, _ = hydraulic_arc_trajectory(_h_bundle(tl), b12, 20.0, 140.0)
+    assert frames[0][5].get("n_tires") == 8
+
+
+def test_right_angle_hydraulic_axle_layer():
+    # 直角弯液压车帧为 6 元组且携带 axle_geoms（§4.5 仅可视化，判定 5.2.1 不动）
+    tl = _h_trailer(axle_count=5)
+    res = run_scene(InputBundle(
+        cargo=_cargo(), trailer=tl, tractor=_tractor(),
+        road=RoadParams(road_type="直角弯道",
+                        right_angle=RightAngleCorner(entry_width=14.0,
+                                                     exit_width=14.0,
+                                                     intersection_angle_deg=90.0,
+                                                     corner_radius=2.0),
+                        vertical_clearance=7.5, highway_grade="三级公路"),
+        max_speed_kmh=10.0))
+    assert res.vehicle_frames and len(res.vehicle_frames[0]) == 6
+    for f in res.vehicle_frames:
+        assert f[5] is not None and f[5].get("axles")
+    # 奇数轴含中间闭锁轴
+    first_data = res.vehicle_frames[0][5]["axles"]
+    assert sum(1 for a in first_data if a[5]) >= 1   # 至少一根闭锁轴
+
+
+def test_right_angle_hydraulic_judgement_unchanged():
+    # 加轴线层不影响 5.2.1：W/R_o/R_i 与机械车一致恢复（纯判定口径不变）
+    tl = _h_trailer(axle_count=4)
+    res = run_scene(InputBundle(
+        cargo=_cargo(), trailer=tl, tractor=_tractor(),
+        road=RoadParams(road_type="直角弯道",
+                        right_angle=RightAngleCorner(entry_width=14.0,
+                                                     exit_width=14.0,
+                                                     intersection_angle_deg=90.0,
+                                                     corner_radius=2.0),
+                        vertical_clearance=7.5, highway_grade="三级公路"),
+        max_speed_kmh=10.0))
+    assert "right_ok" in res.metrics
+    assert res.metrics["W"] > 0
+    assert res.pass_ok in (True, False)
+
+
 def test_b12_theta_min():
     # 下端 1° 钳制，防 tan 除零
     tl = _h_trailer(axle_max_steering_angle_deg=0.5)
@@ -332,10 +391,13 @@ def test_axle_steering_geoms_midlock_zero():
 
 
 def test_axle_draw_odd_axles():
-    # 奇轴 N_a → 首轴 + 末轴 + 中间闭锁轴 三组
+    # 奇轴 N_a → 首轴 + 末轴 + 中间闭锁轴 三组，且中间闭锁轴 δ=0（第六章图式）
     tl = _h_trailer(axle_count=5)
     axles = axle_steering_geoms(0.0, 0.0, 0.0, tl, 10.0, na=5)
     assert [a[0] for a in axles] == [1, 3, 5]
+    mid = next(a for a in axles if a[0] == 3)
+    assert mid[3] == pytest.approx(0.0, abs=1e-9)   # 奇轴中间轴自动闭锁 δ=0
+    assert mid[5] is True                            # 标记为闭锁轴
 
 
 def test_axle_draw_even_axles():

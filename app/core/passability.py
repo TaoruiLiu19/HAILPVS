@@ -555,7 +555,12 @@ def _simulate_right_angle(bundle, entry_w, exit_w, turn_deg):
     profile.append((turn_steps, delta_rec))
     profile.append((int(_STRAIGHT / (_V * _DT)), 0.0))
     frames, _k = run_profile(kin, profile, v=_V, dt=_DT, draw_step=SAMPLES)
-    vgeoms = build_trajectory_geoms(kin, frames, sample_rate=1)
+    # 液压车：追加 B.1.2 瞬心轴线层（仅可视化，判定 5.2.1 不动，见 §4.5）
+    if _is_hydraulic(bundle):
+        vgeoms = build_trajectory_geoms(kin, frames, sample_rate=1,
+                                        b12=hydraulic_turn_radii(bundle))
+    else:
+        vgeoms = build_trajectory_geoms(kin, frames, sample_rate=1)
     swept = polylist_to_multipoly(vgeoms)
     return r_o, r_i, swept_w, r_path, swept, vgeoms
 
@@ -586,8 +591,8 @@ def _split_swept_checks(bundle: InputBundle, vgeoms, road_poly):
     try:
         veh_polys, cargo_polys = [], []
         for frame in vgeoms:
-            # frame = (x, y, geom, trailer_geom, cargo_geom)；geom=元组(合体, 牵引车)
-            _, _, geom, trailer_geom, cargo_geom = frame
+            # frame = (x,y,geom,trailer,cargo) 或液压追加 axle_geoms 的 6 元组；取前 5
+            _, _, geom, trailer_geom, cargo_geom = frame[:5]
             tractor_geom = geom.geoms[1] if geom.geom_type == "MultiPolygon" else geom
             veh_polys.append(unary_union_box(trailer_geom, tractor_geom))
             cargo_polys.append(cargo_geom)

@@ -15,6 +15,12 @@ from config import (MIN_TURN_ANGLE_DEG, AXLE_STEER_ABS_LIMIT_DEG,
 from .datamodel import InputBundle
 
 
+def _axle_tire_count(trailer) -> int:
+    """每轴轮胎数（绘图层示意，第六章图式）。"""
+    from config import TRAILER_TIRE_PER_AXLE
+    return int(TRAILER_TIRE_PER_AXLE.get(trailer.trailer_type, 4))
+
+
 def _rect_into(cx, cy, angle, length, width, pts_out):
     """把以 (cx,cy) 为中心、orientation=angle、长为 length、宽为 width 的
     矩形四角(世界坐标)追加到 pts_out。"""
@@ -139,14 +145,19 @@ def run_profile(kin: TractorTrailerKinematics, profile, v=2.0, dt=0.05,
 
 
 def build_trajectory_geoms(kin: TractorTrailerKinematics, frames,
-                           sample_rate=1):
+                           sample_rate=1, b12=None):
     """把帧序列恢复为完整位姿，逐帧构建外轮廓几何。
 
-    返回 [(x, y, geom, trailer_geom, cargo_geom), ...]：
+    机械车（b12=None）返回 5 元组：
+      (x, y, geom, trailer_geom, cargo_geom)：
       x/y            帧参考点（牵引车状态点，抽帧绘制定位）；
       geom           整车扫掠几何（挂车+货物合并矩形 ∪ 牵引车矩形，用于包络计算）；
       trailer_geom   挂车车板独立矩形（绘制：蓝色车架）；
       cargo_geom     货物独立矩形（绘制：超宽/超长时黑色轮廓凸出车板可见）。
+
+    液压车（传入 b12，D5/§4.5 直角弯复用瞬心）追加第 6 元 axle_geoms：
+      (x, y, geom, trailer_geom, cargo_geom, axle_geoms)，供绘制各轴转向层；
+      判定 5.2.1 口径不动（仅可视化）。
     """
     import copy
 
@@ -174,7 +185,16 @@ def build_trajectory_geoms(kin: TractorTrailerKinematics, frames,
         _km._rect_into(k.x, k.y, k.theta, k.wheelbase + 1.0,
                        k.b.tractor.width, tb_pts)                         # 牵引车
         geom = MultiPolygon([Polygon(env_pts), Polygon(tb_pts)])
-        polys.append((x0, y0, geom, Polygon(tr_pts), Polygon(cg_pts)))
+        if b12 is not None:
+            tl = k.b.trailer
+            rho = b12["sweep_center_dist"]
+            na = max(int(tl.axle_count), 2)
+            ax = axle_steering_geoms(cx, cy, ps, tl, rho, na=na)
+            polys.append((x0, y0, geom, Polygon(tr_pts), Polygon(cg_pts),
+                          {"psi": ps, "rho": rho, "axles": ax,
+                           "n_tires": _axle_tire_count(tl)}))
+        else:
+            polys.append((x0, y0, geom, Polygon(tr_pts), Polygon(cg_pts)))
     return polys
 
 
@@ -275,7 +295,10 @@ def axle_steering_geoms(base_x, base_y, psi, trailer, rho,
     """绕瞬心转向的轴组几何（第六章定点转向，D5/D8 绘图用）。
 
     局部车板坐标系：纵轴 e=航向、横轴 n=航向左侧、瞬心在弯内侧(−n)方距纵轴 rho。
-    首 active 轴中点为原点 (base_x, base_y)；第 i 轴位于其后 longitudinal = (i−first)·spacing。
+    base 为**车板中心** (base_x, base_y)；第 i 轴位于其前向后偏移
+    offset_i = length/2 − front_overhang − (i−1)·spacing（即自车板前端向后
+    front_overhang+(i−1)·spacing 处），与车板矩形几何一致（D7/D8，轴位精确到
+    瞬心坐标并随 coupling 定位）。
     转向角 δ_i（度）按瞬心几何：δ_i = atan( (a_i − a_center)/rho )，其中
     a_i 为该轴到轴组中心的纵向差 —— 首/末轴转角最大且方向相反，指向瞬心；
     锁死轴 δ=0；非锁死轴受 ±axle_max_steering_angle_deg 钳制。
@@ -294,22 +317,29 @@ def axle_steering_geoms(base_x, base_y, psi, trailer, rho,
 
     active = [i for i in range(1, na + 1) if i not in lock] or [1]
     first, last = min(active), max(active)
-    # 纵向坐标(向后为正, 首 active 轴=0)
+    # 纵向坐标(向后为正, 首 active 轴=0)：仅用于瞬心转向角计算
     pos = {i: (i - first) * spacing for i in range(1, na + 1)}
     a_center = (pos[first] + pos[last]) / 2.0
 
     ca, sa = math.cos(psi), math.sin(psi)
+    half_len = float(trailer.length) / 2.0
+    front_oh = float(trailer.front_overhang)
+    # 第六章图式：奇数 Axis 中间 1 根为闭锁轴（自动 δ=0），偶数轴无闭锁轴
+    auto_midlock = (na % 2 == 1) and ((na + 1) // 2) not in lock
     all_axles = []
     for i in range(1, na + 1):
-        d = pos[i]
-        cx = base_x - d * ca
-        cy = base_y - d * sa
-        if i in lock:
+        # 轴 i 距车板中心的前向偏移(向前为正)：车板前端向前 half_len，
+        # 自前端向后 front_overhang+(i−1)·spacing → 轴在该处
+        off = half_len - front_oh - (i - 1) * spacing
+        cx = base_x + off * ca
+        cy = base_y + off * sa
+        is_midlock = (i == (na + 1) // 2) and auto_midlock
+        if i in lock or is_midlock:
             theta_i = 0.0
         else:
-            theta_i = math.degrees(math.atan((d - a_center) / max(rho, 1e-6)))
+            theta_i = math.degrees(math.atan((pos[i] - a_center) / max(rho, 1e-6)))
             theta_i = max(-max_delta, min(max_delta, theta_i))
-        all_axles.append((i, cx, cy, theta_i, half_track, i in lock))
+        all_axles.append((i, cx, cy, theta_i, half_track, i in lock or is_midlock))
 
     def _pick():
         sel = {first, last}
@@ -372,7 +402,8 @@ def hydraulic_arc_trajectory(bundle: InputBundle, b12, radius, turn_deg,
         ax = axle_steering_geoms(ctr[0], ctr[1], psi, tl, rho_f,
                                  na=na)
         vgeoms.append((x, y, geom, tr_g, cg_g,
-                       {"psi": psi, "rho": rho_f, "axles": ax}))
+                       {"psi": psi, "rho": rho_f, "axles": ax,
+                        "n_tires": _axle_tire_count(tl)}))
 
     from .swept_path import polylist_to_multipoly
     swept = polylist_to_multipoly(vgeoms)
@@ -392,7 +423,7 @@ def _rigid_hydra_geoms(bundle, ctr_x, ctr_y, psi):
     _rect_into(ctr_x, ctr_y, psi, tl.length, tl.width, tr_pts)
     _rect_into(ctr_x, ctr_y, psi, cargo.length, cargo.width, cg_pts)
     _rect_into(ctr_x, ctr_y, psi, env_len, env_w, env_pts)
-    ahead = tl.length / 2.0 + trw.length / 2.0
+    ahead = tl.length / 2.0 + float(tl.coupling_length or 0.0) + trw.length / 2.0
     trcx = ctr_x + ahead * math.cos(psi)
     trcy = ctr_y + ahead * math.sin(psi)
     _rect_into(trcx, trcy, psi, trw.length, trw.width, tb_pts)
