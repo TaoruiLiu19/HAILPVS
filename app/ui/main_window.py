@@ -26,6 +26,7 @@ from app.core.datamodel import (InputBundle, CargoParams, TrailerParams, Tractor
                                 RoadParams, ArcCorner, RightAngleCorner)
 from app.core.passability import run_scene
 from app.rendering.sweep_view import draw_sweep_view
+from app.rendering.verdict_style import colorize_verdict_html
 from app.model.project import save_model, load_model, ensure_suffix
 from .qtutil import APP_QSS, _app_font, _primary_screen_geometry
 from .widgets import (_make_form_group, _row_label, _new_combo, _new_edit,
@@ -409,9 +410,9 @@ class MainWindow(QMainWindow):
         self._render_result(res)
 
     def _render_result(self, res):
-        lines = []
-        for ln in res.verdict_lines:
-            lines.append(_esc_html(ln))
+        # verdict_lines 已含 HTML 标记（<sub>/<sup> 上下标）与判定词，先对判定词
+        # 上色（通过/满足/合格=绿，不通过/不满足/不合格=红），再以富文本渲染
+        lines = [colorize_verdict_html(ln) for ln in res.verdict_lines]
         verdict = "通过" if res.pass_ok else "不通过"
         color = "#2f855a" if res.pass_ok else "#c53030"
         lines.append(f"<b style='color:{color};font-size:12pt;'>【结论】检验结论：{verdict}</b>")

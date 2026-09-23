@@ -5,6 +5,7 @@
 """
 import datetime
 import os
+import re
 import tempfile
 
 from docx import Document
@@ -15,6 +16,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 
 from ..core.passability import SweepScenarioResult
 from ..rendering.sweep_view import draw_sweep_view
+from ..rendering.verdict_style import verdict_color, COLOR_GREEN, COLOR_RED
 
 
 # ===== 字体工具（复用参考项目 set_font_kai）=====
@@ -24,6 +26,11 @@ def set_font_kai(run, font_size=12, bold=False):
     run.font.size = Pt(font_size)
     run.font.color.rgb = RGBColor(0, 0, 0)
     run.font.bold = bold
+
+
+def _hex_rgb(hexstr: str) -> RGBColor:
+    h = hexstr.lstrip("#")
+    return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 
 
 def _add_param_table(doc, rows, title_text):
@@ -45,6 +52,51 @@ def _add_para(doc, text, size=12, bold=False):
     p = doc.add_paragraph()
     r = p.add_run(text)
     set_font_kai(r, size, bold=bold)
+    return p
+
+
+_SUBSUP_TAGS = re.compile(r'(<sub>|</sub>|<sup>|</sup>|<b>|</b>|<i>|</i>)')
+
+
+def _add_formula_para(doc, text, size=12, bold=False):
+    """按 <sub>/<sup>/<b>/<i> 分段写入，生成真正带上下标/加粗的 Word 段落。
+
+    与界面富文本共用同一套轻量 HTML 标记；其余实体（&lt; 等）在此解码。
+    """
+    p = doc.add_paragraph()
+    sub = sup = italic = False
+    inner_bold = bold
+    for tok in _SUBSUP_TAGS.split(text):
+        if not tok:
+            continue
+        if tok == "<sub>":
+            sub, sup = True, False
+            continue
+        if tok == "<sup>":
+            sup, sub = True, False
+            continue
+        if tok == "</sub>" or tok == "</sup>":
+            sub = sup = False
+            continue
+        if tok == "<i>" or tok == "</i>":
+            italic = tok == "<i>"
+            continue
+        if tok == "<b>" or tok == "</b>":
+            inner_bold = inner_bold if tok == "</b>" else True
+            continue
+        tok = tok.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+        if not tok:
+            continue
+        r = p.add_run(tok)
+        set_font_kai(r, size, bold=inner_bold)
+        r.font.italic = italic
+        if sub:
+            r.font.subscript = True
+        if sup:
+            r.font.superscript = True
+        _c = verdict_color(tok)
+        if _c:
+            r.font.color.rgb = _hex_rgb(_c)
     return p
 
 
@@ -123,7 +175,7 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
     h5r = h5.add_run("五、检验结论")
     set_font_kai(h5r, 14, bold=True)
     for line in res.verdict_lines:
-        _add_para(doc, line, 12)
+        _add_formula_para(doc, line, 12)
     verdict = "通过" if res.pass_ok else "不通过"
     _add_para(doc, f"综合评定：该运输车辆（牵引车-挂车-货物）在该弯道工况下可通行性判定为【{verdict}】。", 12, bold=True)
 

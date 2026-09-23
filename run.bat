@@ -1,53 +1,58 @@
 @echo off
-chcp 65001 >nul
-setlocal
+setlocal EnableExtensions
+title Oversize Transport Passability Check
 cd /d "%~dp0"
-title 大件运输弯道通过性检验系统
 
-rem ===== 使用本机全局 Python（优先 3.12）=====
+rem --- pick a Python interpreter, most specific first ---
 set "PY="
 
-rem 1) 优先用 py launcher 选 3.12
-py -3.12 -V >nul 2>&1 && set "PY=py -3.12"
-
-rem 2) 退而求其次，直接用 PATH 里的 python
-if not defined PY python -V >nul 2>&1 && set "PY=python"
-
-rem 3) 都找不到，报错退出
-if not defined PY (
-    echo [ERROR] Python 3.12 not found on this machine.
-    echo Please install Python 3.12 and make sure "py" works in PATH.
-    pause
-    exit /b 1
+rem 1) primary: full path of the global interpreter (edit PYPRI to taste)
+set "PYPRI=E:\python\Python312\python.exe"
+if exist "%PYPRI%" (
+    set "PY=%PYPRI%"
+    goto :found
 )
 
-rem 健康检查：能打印版本才继续
-%PY% -c "import encodings, sys; print(sys.version)" >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] The detected Python is broken: %PY%
-    echo Check PYTHONHOME / PYTHONPATH, or reinstall Python.
-    pause
-    exit /b 1
+rem 2) fallback: py launcher, only if it can actually see 3.12
+where py >nul 2>&1
+if not errorlevel 1 (
+    py -0p 2>nul | findstr /i /c:"3.12" >nul
+    if not errorlevel 1 (
+        set "PY=py -3.12"
+        goto :found
+    )
 )
 
-rem 依赖自检：核心库缺失时自动调用 pip 安装
+rem 3) fallback: bare python on PATH
+where python >nul 2>&1
+if not errorlevel 1 (
+    set "PY=python"
+    goto :found
+)
+
+echo [ERROR] No suitable Python runtime found.
+echo Please install Python 3.12, or edit PYPRI near the top of run.bat
+echo to point at your full python.exe path.
+pause
+exit /b 1
+
+:found
+echo [INFO] Using: %PY%
+%PY% -V
+
+rem --- dependency self-check; only install when something is missing ---
 %PY% -c "import PyQt5, pydantic, shapely, docx, matplotlib" >nul 2>&1
 if errorlevel 1 (
     echo [INFO] Missing dependencies, installing via pip...
     %PY% -m pip install -r requirements.txt
     if errorlevel 1 (
-        echo [ERROR] Failed to install dependencies. Please run:
-        echo     %PY% -m pip install -r requirements.txt
+        echo [ERROR] Failed to install dependencies.
+        echo Please run manually:  %PY% -m pip install -r requirements.txt
         pause
         exit /b 1
     )
 )
 
-echo Using Python: %PY%
+echo [INFO] Launching main.py ...
 %PY% -u main.py
-set "EXITCODE=%ERRORLEVEL%"
-echo.
-echo Program exited with code %EXITCODE%.
-echo If there was an error, the detail is saved in runtime.log in this folder.
 pause
-exit /b %EXITCODE%
