@@ -29,6 +29,8 @@ DIM_COLOR = "#0d47a1"         # 尺寸/半径/交角等所有标注线统一色�
 CENTER_COLOR = "#e02020"      # 关键参考点：红色十字
 TEXT_COLOR = "#0d47a1"        # 标注文字：与标注线同色（深蓝）
 SPINE_COLOR = "#b8c0c8"       # 坐标轴细线：浅灰
+AXLE_COLOR = "#7b3fe4"        # 液压车轴段/转向轮：紫色（区别于机械车黑色轮廓）
+LOCKED_TEXT_COLOR = "#c53030" # 闭锁轴文字：红色
 
 # 构造弧(扫掠 R_o/R_i)相对道路边界的向内留隙(m)：避免半径弧贴近/压过内缘线
 _SWEPT_ARC_INSET = 0.5
@@ -74,6 +76,37 @@ def _crosshair(ax, x, y, arm=1.8):
     """红色十字：关键参考点（转弯圆心）。"""
     ax.plot([x - arm, x + arm], [y, y], color=CENTER_COLOR, linewidth=1.2, zorder=5)
     ax.plot([x, x], [y - arm, y + arm], color=CENTER_COLOR, linewidth=1.2, zorder=5)
+
+
+def _plot_steered_axle(ax, cx, cy, psi, delta_deg, half_track, locked,
+                       color=AXLE_COLOR):
+    """绘制液压车一根轴：轴段 + 两侧按 δ 偏转的轮胎实体（第六章图式）。
+
+    cx/cy 为轴中点；psi 为车板航向；delta_deg 为该轴转向角（首/末朝瞬心偏转、
+    闭锁轴保持 ψ 平行即 δ=0）。half_track 为轮距半宽。轮胎沿偏转方向画小矩形。
+    """
+    tire_len, tire_wid = 1.1, 0.34           # 轮胎实体尺寸（m，示意）
+    ca, sa = math.cos(psi), math.sin(psi)
+    # 轴段：垂直于车板纵轴
+    nx, ny = -sa, ca
+    ax.plot([cx - nx * half_track, cx + nx * half_track],
+            [cy - ny * half_track, cy + ny * half_track],
+            color=color, linewidth=1.0, zorder=4)
+    da = math.radians(delta_deg)
+    tca, tsa = math.cos(psi + da), math.sin(psi + da)    # 轮胎方向(受 δ 偏转)
+    for sgn in (-1.0, 1.0):
+        wx = cx + sgn * nx * half_track
+        wy = cy + sgn * ny * half_track
+        hx, hy = tire_len / 2.0, tire_wid / 2.0
+        corners = [(wx + (-hx * tca - -hy * -tsa), wy + (-hx * tsa + -hy * tca)),
+                   (wx + (hx * tca - -hy * -tsa), wy + (hx * tsa + -hy * tca)),
+                   (wx + (hx * tca - hy * tsa), wy + (hx * tsa + hy * tca)),
+                   (wx + (-hx * tca - hy * tsa), wy + (-hx * tsa + hy * tca))]
+        _plot_ring(ax, corners, color, 1.0)
+    if locked:
+        ax.text(cx + 2 * nx * half_track, cy + 2 * ny * half_track, "闭锁",
+                color=LOCKED_TEXT_COLOR, fontsize=7, ha="center", va="center",
+                family="Microsoft YaHei", zorder=5)
 
 
 def _annotate_radius(ax, center, radius, span_deg, label, side, road=None,
@@ -223,13 +256,20 @@ def draw_sweep_view(res: SweepScenarioResult, out_path, dpi=PLOT_DPI,
 
     # Layer 3: 抽帧车辆轮廓 —— 挂车/牵引车蓝色中实线；货物绿色细线
     #           （无论超宽与否都单独画出货物轮廓，直观反映车货相对关系）
-    for _x, _y, geom, trailer_geom, cargo_geom in res.vehicle_frames:
+    for frame in res.vehicle_frames:
+        _x, _y, geom, trailer_geom, cargo_geom = frame[:5]
+        axle_geoms = frame[5] if len(frame) > 5 else None
         geoms = geom.geoms if geom.geom_type == "MultiPolygon" else [geom]
         # 牵引车（合并几何最后一个组件）
         if len(geoms) >= 2:
             _plot_ring(ax, list(geoms[-1].exterior.coords), VEHICLE_COLOR, 1.1)
         # 挂车车板
         _plot_ring(ax, list(trailer_geom.exterior.coords), VEHICLE_COLOR, 1.1)
+        # 液压车轴线层（仅当此帧携带 axle_geoms）
+        if axle_geoms and axle_geoms.get("axles"):
+            psi = axle_geoms.get("psi", 0.0)
+            for (aidx, axc, axy, dd, halft, locked) in axle_geoms["axles"]:
+                _plot_steered_axle(ax, axc, axy, psi, dd, halft, locked)
         # 货物轮廓（始终显示）
         _plot_ring(ax, list(cargo_geom.exterior.coords), CARGO_COLOR, 1.2)
         ax.plot([_x], [_y], "o", color=VEHICLE_COLOR, markersize=3, zorder=4)
@@ -354,6 +394,8 @@ def draw_sweep_view(res: SweepScenarioResult, out_path, dpi=PLOT_DPI,
         Line2D([0], [0], color=SWEPT_ARC_COLOR, lw=1.0, label="扫掠曲线（R_o / R_i）"),
         Line2D([0], [0], color=VEHICLE_COLOR, lw=1.1, label="车辆轮廓（挂车 / 牵引车）"),
         Line2D([0], [0], color=CARGO_COLOR, lw=1.2, label="货物轮廓"),
+        Line2D([0], [0], color=AXLE_COLOR, lw=1.1, ls="-",
+               label="液压车轴线/转向轮（仅液压车，δ朝瞬心）"),
         Line2D([0], [0], color=DIM_COLOR, lw=0.9, label="道路曲线内 / 外缘半径"),
         Line2D([0], [0], color=DIM_COLOR, lw=0.9, ls=(0, (6, 2)),
                label="交角 / 内角半径 构造线"),

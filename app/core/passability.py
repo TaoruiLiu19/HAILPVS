@@ -23,7 +23,8 @@ from config import (TURN_SAFE_CLEARANCE, LATERAL_CLEARANCE_BY_GRADE,
                     AXLE_STEER_ABS_LIMIT_DEG)
 from .datamodel import InputBundle
 from .kinematics import (TractorTrailerKinematics, run_profile,
-                         build_trajectory_geoms, hydraulic_turn_radii)
+                         build_trajectory_geoms, hydraulic_turn_radii,
+                         hydraulic_arc_trajectory)
 from .swept_path import measure_steady_turn, polylist_to_multipoly
 from . import transverse as _transverse
 from . import grade as _grade
@@ -355,19 +356,22 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
     rev_steps = int(4 * math.pi / (ang_vel * _DT))
     r_o, r_i = measure_steady_turn(kin, rev_steps, v=_V, dt=_DT, center=center)
     swept_w = r_o - r_i
-    vgeoms, swept = _build_arc_display(bundle, r_path, delta_used)
 
     b12 = None
     trajectory_source = "铰接尾随"
     if _is_hydraulic(bundle):
         b12 = hydraulic_turn_radii(bundle)
-        # B.1.2 口径优先：扫空=W_swept(=d)、转弯通道=W_turn=d+0.5；仿真量测降级为附注(不再无条件 max)
+        # B.1.2 口径优先：扫空=W_swept(=d)、转弯通道=W_turn=d+0.5
+        # 轨迹/扫掠按 B.1.2 瞬心刚体圆周生成(D5)，区别于机械车铰接尾随——
+        # 液压车沿道路中心线半径 r_path 做刚体圆周，包络更紧凑
         trajectory_source = "B.1.2"
         swept_w = b12["W_swept"]
         turn_channel_w = b12["W_turn"]
+        vgeoms, swept = hydraulic_arc_trajectory(bundle, b12, r_path, _TURN_DEG)
     else:
-        # B.1.1/B.1.1 机械挂车：仿真扫空宽度计入 0.5m 安全宽度
+        # B.1.1 机械挂车：仿真扫空宽度计入 0.5m 安全宽度；轨迹走铰接尾随
         turn_channel_w = swept_w + TURN_SAFE_CLEARANCE
+        vgeoms, swept = _build_arc_display(bundle, r_path, delta_used)
 
     sigma = _effective_sigma(bundle)
     road_w = _transverse.road_width(road, lane)           # 路面宽度

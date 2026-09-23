@@ -59,6 +59,8 @@ _TRAILER_FIELDS = [
     ("挂车轴数", "t_axle_count", "axle_count", True),
     ("挂车轴距(m)", "t_axle_spacing", "axle_spacing", True),
     ("轮距(m)", "t_track_width", "track_width", True),
+    ("每轴最大转向角(°)(液压)", "t_axle_steer_deg", "axle_max_steering_angle_deg", True),
+    ("连接部分长度(m)(液压)", "t_coupling_length", "coupling_length", True),
 ]
 _TRACTOR_FIELDS = [
     ("牵引车轴距(m)", "tr_wheelbase", "wheelbase", True),
@@ -235,6 +237,11 @@ class MainWindow(QMainWindow):
             ed = _new_edit("0.0")
             self.edits[key] = ed
             f_t.addRow(_row_label(f"{label}："), ed)
+        self.cmb_coupling_type = _new_combo(("鹅颈", "连接杆"), "鹅颈")
+        f_t.addRow(_row_label("连接方式(液压)："), self.cmb_coupling_type)
+        # 液压每轴最大转向角默认取第六章典型值 45°（B.1.2 D2，界面可调）
+        if "t_axle_steer_deg" in self.edits:
+            self.edits["t_axle_steer_deg"].setText("45.0")
         v.addWidget(g_t)
 
         # 3. 牵引车参数
@@ -355,6 +362,9 @@ class MainWindow(QMainWindow):
             axle_spacing=self._f("t_axle_spacing"),
             track_width=self._f("t_track_width"),
             steering_type="全轮强制转向",
+            axle_max_steering_angle_deg=self._f("t_axle_steer_deg"),
+            coupling_type=self.cmb_coupling_type.currentText(),
+            coupling_length=self._f("t_coupling_length"),
         )
         tractor = TractorParams(
             wheelbase=self._f("tr_wheelbase"),
@@ -444,6 +454,7 @@ class MainWindow(QMainWindow):
             d[k] = ed.text()
         d["pad"] = self.cmb_pad.currentText()
         d["trailer_type"] = self.cmb_trailer_type.currentText()
+        d["coupling_type"] = self.cmb_coupling_type.currentText()
         d["road_type"] = self.cmb_road.currentText()
         d["highway_grade"] = self.cmb_grade.currentText()
         d["vertical_clearance"] = self._f("vertical_clearance")
@@ -465,6 +476,8 @@ class MainWindow(QMainWindow):
             self.cmb_pad.setCurrentText(str(d["pad"]))
         if "trailer_type" in d:
             self.cmb_trailer_type.setCurrentText(str(d["trailer_type"]))
+        if "coupling_type" in d:
+            self.cmb_coupling_type.setCurrentText(str(d["coupling_type"]))
         if "road_type" in d:
             self.cmb_road.setCurrentText(str(d["road_type"]))
         if "highway_grade" in d:

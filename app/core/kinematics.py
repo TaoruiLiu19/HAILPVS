@@ -264,3 +264,137 @@ def hydraulic_coupling_draw_anchor(bundle: InputBundle, tractor_rear_x,
     off = float(tl.coupling_length or 0.0)
     return (tractor_rear_x + off * math.cos(psi),
             tractor_rear_y + off * math.sin(psi))
+
+
+# =====================================================================
+# 阶段二：液压轴线挂车瞬心轨迹 + 多轴转向绘制（D5）
+# =====================================================================
+def axle_steering_geoms(base_x, base_y, psi, trailer, rho,
+                        want=("first", "last", "midlock"),
+                        na=None, locked_axles=None):
+    """绕瞬心转向的轴组几何（第六章定点转向，D5/D8 绘图用）。
+
+    局部车板坐标系：纵轴 e=航向、横轴 n=航向左侧、瞬心在弯内侧(−n)方距纵轴 rho。
+    首 active 轴中点为原点 (base_x, base_y)；第 i 轴位于其后 longitudinal = (i−first)·spacing。
+    转向角 δ_i（度）按瞬心几何：δ_i = atan( (a_i − a_center)/rho )，其中
+    a_i 为该轴到轴组中心的纵向差 —— 首/末轴转角最大且方向相反，指向瞬心；
+    锁死轴 δ=0；非锁死轴受 ±axle_max_steering_angle_deg 钳制。
+
+    返回 [(轴序号, 轴中点(cx,cy), δ_i°, 轮距半宽, 是否锁死), ...]，
+    已按 want 选出绘制轴：奇轴含中间闭锁轴((Na+1)//2)，偶轴无闭锁轴只出首末。
+    """
+    if na is None:
+        na = max(int(trailer.axle_count), 2)
+    lock = {int(a) for a in (locked_axles if locked_axles is not None
+                             else trailer.locked_axles) if 1 <= int(a) <= na}
+    spacing = float(trailer.axle_spacing)
+    half_track = float(trailer.track_width) / 2.0
+    max_delta = min(float(trailer.axle_max_steering_angle_deg),
+                    AXLE_STEER_ABS_LIMIT_DEG)
+
+    active = [i for i in range(1, na + 1) if i not in lock] or [1]
+    first, last = min(active), max(active)
+    # 纵向坐标(向后为正, 首 active 轴=0)
+    pos = {i: (i - first) * spacing for i in range(1, na + 1)}
+    a_center = (pos[first] + pos[last]) / 2.0
+
+    ca, sa = math.cos(psi), math.sin(psi)
+    all_axles = []
+    for i in range(1, na + 1):
+        d = pos[i]
+        cx = base_x - d * ca
+        cy = base_y - d * sa
+        if i in lock:
+            theta_i = 0.0
+        else:
+            theta_i = math.degrees(math.atan((d - a_center) / max(rho, 1e-6)))
+            theta_i = max(-max_delta, min(max_delta, theta_i))
+        all_axles.append((i, cx, cy, theta_i, half_track, i in lock))
+
+    def _pick():
+        sel = {first, last}
+        if "midlock" in want and na % 2 == 1:
+            m = (na + 1) // 2
+            if 1 <= m <= na:
+                sel.add(m)
+        return sel
+
+    sel = _pick()
+    return [a for a in all_axles if a[0] in sel]
+
+
+def hydraulic_arc_trajectory(bundle: InputBundle, b12, radius, turn_deg,
+                             straight=6.0, dt=0.05, draw_step=8):
+    """液压轴线挂车专属刚性圆周轨迹（D5：行为区分可视化）。
+
+    整车刚体绕转弯圆心 O 以 radius 为半径做匀速圆周运动（无铰接尾摆），
+    产生比机械铰接尾随更紧密的扫掠；每帧同时计算各轴转向几何供绘制。
+
+    返回 (frames, swept)。frames 元素为 6 元组：
+      (x, y, geom, trailer_geom, cargo_geom, axle_geoms)
+    axle_geoms = {"psi": ψ, "rho": rho, "axles": [(idx,cx,cy,δ°,半轮距,锁死),...]}
+    机械车不调用本函数，仍走 build_trajectory_geoms 铰接尾随。
+    """
+    from shapely.geometry import Polygon, MultiPolygon
+
+    tl = bundle.trailer
+    R = float(radius)
+    rho = float(b12["sweep_center_dist"])          # D5 瞬心横向偏距≈base
+    na = max(int(tl.axle_count), 2)
+    turn_rad = math.radians(turn_deg)
+
+    frames = []
+    # —— 出入弯前后各取一段直线，贴合机械车画法 ——
+    line_pts = 6
+    # 入弯直道：沿 -Y 驶向 (R, 0)，航向 +90°
+    for j in range(line_pts):
+        y = -straight + straight * (j / (line_pts - 1))
+        psi = math.radians(90.0)
+        frames.append((R, y, psi, rho, (R, y)))
+    # 圆弧段：φ: 0→turn_deg，中心 (R cosφ, R sinφ)，航向 90°+φ
+    n = max(int(turn_deg / 3.0), 20)
+    for k in range(n + 1):
+        phi = turn_rad * k / n
+        cx, cy = R * math.cos(phi), R * math.sin(phi)
+        psi = math.radians(90.0) + phi
+        frames.append((cx, cy, psi, rho, (cx, cy)))
+    # 出弯直道：沿末端切向
+    end_psi = math.radians(90.0) + turn_rad
+    ex, ey = frames[-1][0], frames[-1][1]
+    for j in range(1, line_pts + 1):
+        frames.append((ex + (straight * j / line_pts) * math.cos(end_psi),
+                       ey + (straight * j / line_pts) * math.sin(end_psi),
+                       end_psi, rho, (ex, ey)))
+
+    vgeoms = []
+    for x, y, psi, rho_f, ctr in frames:
+        geom, tr_g, cg_g = _rigid_hydra_geoms(bundle, x, y, psi)
+        ax = axle_steering_geoms(ctr[0], ctr[1], psi, tl, rho_f,
+                                 na=na)
+        vgeoms.append((x, y, geom, tr_g, cg_g,
+                       {"psi": psi, "rho": rho_f, "axles": ax}))
+
+    from .swept_path import polylist_to_multipoly
+    swept = polylist_to_multipoly(vgeoms)
+    return vgeoms, swept
+
+
+def _rigid_hydra_geoms(bundle, ctr_x, ctr_y, psi):
+    """刚体帧几何：挂车/货物/牵引车各自一个矩形(避免帧内自交)。"""
+    from shapely.geometry import Polygon, MultiPolygon
+
+    tl = bundle.trailer
+    cargo = bundle.cargo
+    trw = bundle.tractor
+    env_len = max(tl.length, cargo.length)
+    env_w = max(tl.width, cargo.width)
+    tr_pts, cg_pts, env_pts, tb_pts = [], [], [], []
+    _rect_into(ctr_x, ctr_y, psi, tl.length, tl.width, tr_pts)
+    _rect_into(ctr_x, ctr_y, psi, cargo.length, cargo.width, cg_pts)
+    _rect_into(ctr_x, ctr_y, psi, env_len, env_w, env_pts)
+    ahead = tl.length / 2.0 + trw.length / 2.0
+    trcx = ctr_x + ahead * math.cos(psi)
+    trcy = ctr_y + ahead * math.sin(psi)
+    _rect_into(trcx, trcy, psi, trw.length, trw.width, tb_pts)
+    geom = MultiPolygon([Polygon(env_pts), Polygon(tb_pts)])
+    return geom, Polygon(tr_pts), Polygon(cg_pts)

@@ -19,7 +19,9 @@ from app.core.passability import run_scene
 from app.core.grade import (classify, classify_bundle, TABLE_4_3_1,
                             arch_lookup_apply)
 from app.core.kinematics import (hydraulic_turn_radii,
-                                 hydraulic_coupling_draw_anchor)
+                                 hydraulic_coupling_draw_anchor,
+                                 axle_steering_geoms,
+                                 hydraulic_arc_trajectory)
 from app.core.lateral import (side_slip_critical_v, overturn_critical_v,
                               parking_superelevation_ok)
 from config import AXLE_STEER_ABS_LIMIT_DEG, MIN_TURN_ANGLE_DEG
@@ -315,6 +317,80 @@ def test_b12_judgement_turn_channel_vs_road_width():
     # 查表(3级C半径>22、横向空间18>…)若不命中则落入验算；此用例确保不因异常而挂
     assert isinstance(res.metrics["B1_2_W_turn"], float)
     assert res.metrics["B1_2_W_turn"] == pytest.approx(15.5)
+
+
+# ---- S2: 液压车瞬心轨迹 + 多轴转向绘制（D5）----
+def test_axle_steering_geoms_midlock_zero():
+    # 奇轴含中间闭锁轴，其 δ=0；首/末轴 δ 方向一致指向瞬心且坐标在车板内
+    tl = _h_trailer(axle_count=5, locked_axles=[3])   # 第3轴为中间闭锁轴
+    axles = axle_steering_geoms(0.0, 0.0, 0.0, tl, 10.0, na=5)
+    mid = next(a for a in axles if a[0] == 3)
+    assert mid[3] == pytest.approx(0.0, abs=1e-9)     # 闭锁轴 δ=0
+    assert mid[5] is True
+    others = [a for a in axles if a[0] != 3]
+    assert any(a[3] != 0.0 for a in others)           # 首/末轴有偏转
+
+
+def test_axle_draw_odd_axles():
+    # 奇轴 N_a → 首轴 + 末轴 + 中间闭锁轴 三组
+    tl = _h_trailer(axle_count=5)
+    axles = axle_steering_geoms(0.0, 0.0, 0.0, tl, 10.0, na=5)
+    assert [a[0] for a in axles] == [1, 3, 5]
+
+
+def test_axle_draw_even_axles():
+    # 偶轴 N_a → 只首轴 + 末轴，无闭锁轴(δ=0 仅当用户显式锁死)
+    tl = _h_trailer(axle_count=4)
+    axles = axle_steering_geoms(0.0, 0.0, 0.0, tl, 10.0, na=4)
+    assert [a[0] for a in axles] == [1, 4]
+    axles_locked = axle_steering_geoms(0.0, 0.0, 0.0, tl, 10.0, na=4,
+                                       locked_axles=[2])
+    # 显式锁死才可能出 δ=0，且中间闭锁轴不在默认绘制集
+    assert 2 not in [a[0] for a in axles_locked]
+
+
+def test_hydra_arc_trajectory_frames_have_axles():
+    # 液压车轨迹为刚性圆周，且每帧携带 axle_geoms(6 元组)
+    tl = _h_trailer(axle_count=4)
+    b12 = hydraulic_turn_radii(_h_bundle(tl))
+    frames, swept = hydraulic_arc_trajectory(_h_bundle(tl), b12, 20.0, 140.0)
+    assert len(frames) > 5
+    assert swept is not None and not swept.is_empty
+    for f in frames:
+        assert len(f) == 6                    # 追加 axle_geoms
+        assert f[5] is not None and f[5].get("axles")
+        for (_i, _cx, _cy, _dd, _ht, _lk) in f[5]["axles"]:
+            assert abs(_dd) <= AXLE_STEER_ABS_LIMIT_DEG + 1e-6
+
+
+def test_two_vehicle_trajectory_diff():
+    # 同一几何下：机械车铰接尾随(挂车外摆)扫掠带更宽；液压车瞬心刚体(无铰尾摆)扫掠带更窄，
+    # 且两者扫掠几何不同/面积不同(D5 行为区别)。
+    common = dict(outer=28.0, lane=7.0)
+    mec = run_scene(_arc_bundle(lowbed=True, axle_count=4, axle_spacing=1.5,
+                                track=2.9, **common))
+    hyd = run_scene(_h_bundle(_h_trailer(axle_count=4, axle_spacing=1.5,
+                                         track_width=2.9), **common))
+    assert mec.metrics["trajectory_source"] == "铰接尾随"
+    assert hyd.metrics["trajectory_source"] == "B.1.2"
+    r_mec = [math.hypot(*p) for p in _ring_pts(mec.swept)]
+    r_hyd = [math.hypot(*p) for p in _ring_pts(hyd.swept)]
+    band_mec = max(r_mec) - min(r_mec)
+    band_hyd = max(r_hyd) - min(r_hyd)
+    assert band_hyd < band_mec + 1e-9          # 液压车扫掠带更窄：瞬心刚体无铰尾摆
+    assert mec.swept.area != pytest.approx(hyd.swept.area, abs=2.0)
+
+
+def _ring_pts(geom):
+    """取扫掠几何所有外环/内环坐标点(扁平列表)。"""
+    pts = []
+    if geom is None or geom.is_empty:
+        return pts
+    polys = geom.geoms if geom.geom_type == "MultiPolygon" else [geom]
+    for p in polys:
+        for ring in ([p.exterior] + list(p.interiors)):
+            pts.extend(ring.coords)
+    return pts
 
 
 # ---- M7: 垂直净空 ----
