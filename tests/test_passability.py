@@ -18,9 +18,11 @@ from app.core.datamodel import (InputBundle, CargoParams, TrailerParams,
 from app.core.passability import run_scene
 from app.core.grade import (classify, classify_bundle, TABLE_4_3_1,
                             arch_lookup_apply)
-from app.core.kinematics import hydraulic_turn_radii
+from app.core.kinematics import (hydraulic_turn_radii,
+                                 hydraulic_coupling_draw_anchor)
 from app.core.lateral import (side_slip_critical_v, overturn_critical_v,
                               parking_superelevation_ok)
+from config import AXLE_STEER_ABS_LIMIT_DEG, MIN_TURN_ANGLE_DEG
 
 
 def _tractor():
@@ -52,6 +54,24 @@ def _arc_bundle(lowbed=True, outer=30.0, lane=7.0, grade="三级公路",
                         vertical_clearance=vertical, highway_grade=grade,
                         lateral_clearance=lateral_clearance),
         max_speed_kmh=10.0, load_factor=1.0)
+
+
+def _h_trailer(**kw):
+    """液压轴线挂车便捷构造；kw 覆盖默认参数（含 θ/锁死轴/耦合字段）。"""
+    d = dict(trailer_type="液压轴线挂车", length=12.0, width=3.0,
+             deck_height=1.2, axle_count=4, axle_spacing=1.5, track_width=2.9)
+    d.update(kw)
+    return TrailerParams(**d)
+
+
+def _h_bundle(trailer, outer=30.0, lane=7.0):
+    """弧形弯道 + 指定液压挂车的完整输入。"""
+    return InputBundle(
+        cargo=_cargo(), trailer=trailer, tractor=_tractor(),
+        road=RoadParams(road_type="圆弧弯道",
+                        arc=ArcCorner(outer_radius=outer, lane_width=lane),
+                        vertical_clearance=7.5, highway_grade="三级公路"),
+        max_speed_kmh=10.0)
 
 
 # ---- M1: 0.5m 安全宽度 ----
@@ -181,10 +201,10 @@ def test_m6_hydraulic_radius_grows_with_axles():
     # 轴数不影响转向角(限45°)同时首末轴距项与 (D总−d)/2 相抵 ⇒ R_in = D总/2 恒定
     assert all(abs(rin[i] - rin[0]) < 1e-9 for i in range(len(rin) - 1))
     assert all(rout[i] < rout[i + 1] for i in range(len(rout) - 1))   # R_out 单调增
-    # B.1.2-6 扫空宽度 W = d = 首末轴距 = L轮挂·(Na−1)
+    # B.1.2-6 扫空宽度 W_swept = d = 首末轴距 = L轮挂·(Na−1)
     b = _arc_bundle(lowbed=False, axle_count=4, axle_spacing=1.5)
     r = hydraulic_turn_radii(b)
-    assert r["W"] == pytest.approx(1.5 * (4 - 1))
+    assert r["W_swept"] == pytest.approx(1.5 * (4 - 1))
     assert r["R_out"] - r["R_in"] == pytest.approx(4.5)
 
 
@@ -200,9 +220,101 @@ def test_m6_hydraulic_Lwheel_is_axle_spacing_not_track():
     # 轮距不影响（修复前会错误触发）
     assert r_wide["R_in"] == pytest.approx(r0["R_in"], abs=1e-9)
     assert r_wide["R_out"] == pytest.approx(r0["R_out"], abs=1e-9)
-    # 轴距影响：R_out 与扫空宽度 W=d 随之增大
+    # 轴距影响：R_out 与扫空宽度 W_swept=d 随之增大
     assert r_long["R_out"] > r0["R_out"]
-    assert r_long["W"] > r0["W"]
+    assert r_long["W_swept"] > r0["W_swept"]
+
+
+# ---- B.1.2 规范接入（D2/D1/D4/D3/D8）----
+def test_b12_theta_src():
+    # D2: θ 取自挂车轴最大转向角，不读牵引车前轮角
+    tl = _h_trailer(axle_max_steering_angle_deg=25.0)
+    b = _h_bundle(tl)
+    b.tractor.max_steering_angle_deg = 70.0     # 牵引车前轮角更大也不应影响 θ
+    r = hydraulic_turn_radii(b)
+    assert r["theta_deg"] == pytest.approx(25.0, abs=1e-9)
+
+
+def test_b12_theta_upperbound():
+    # D6: θ 钳到工程上限，不做原地回转(θ<90)
+    tl = _h_trailer(axle_max_steering_angle_deg=85.0)
+    r = hydraulic_turn_radii(_h_bundle(tl))
+    assert r["theta_deg"] == pytest.approx(AXLE_STEER_ABS_LIMIT_DEG, abs=1e-9)
+    assert math.isfinite(r["R_in"]) and math.isfinite(r["R_out"]) and r["R_in"] > 0
+
+
+def test_b12_theta_min():
+    # 下端 1° 钳制，防 tan 除零
+    tl = _h_trailer(axle_max_steering_angle_deg=0.5)
+    r = hydraulic_turn_radii(_h_bundle(tl))
+    assert r["theta_deg"] == pytest.approx(MIN_TURN_ANGLE_DEG, abs=1e-9)
+    assert math.isfinite(r["R_in"]) and math.isfinite(r["R_out"])
+
+
+def test_b12_locked_middle_spec():
+    # D1: 纯中间锁死不改变 d，spec_mode=True(严格守规范)
+    tl = _h_trailer(axle_count=5, locked_axles=[2, 3])
+    r = hydraulic_turn_radii(_h_bundle(tl))
+    assert r["spec_mode"] is True
+    assert r["d"] == pytest.approx(1.5 * (5 - 1))
+    assert r["W_swept"] == pytest.approx(1.5 * (5 - 1))
+
+
+def test_b12_locked_ends_extrap():
+    # D1: 锁死首轴 → 规范外推 d 缩短 + 告警
+    tl = _h_trailer(axle_count=5, locked_axles=[1])
+    r = hydraulic_turn_radii(_h_bundle(tl))
+    assert r["spec_mode"] is False
+    assert r["d"] == pytest.approx(1.5 * (5 - 2))   # last=5,first=2
+    assert r["warnings"] and "锁死" in r["warnings"][0]
+
+
+def test_b12_D_total_coupling_independent():
+    # D3/D8: D_total=车板长；耦合连接字段不影响 D_total/R/W_swept
+    tl0 = _h_trailer(length=12.0)
+    tl1 = _h_trailer(length=12.0, coupling_type="连接杆", coupling_length=5.0)
+    r0, r1 = hydraulic_turn_radii(_h_bundle(tl0)), hydraulic_turn_radii(_h_bundle(tl1))
+    assert r1["D_total"] == pytest.approx(r0["D_total"])
+    assert r1["D_total"] == pytest.approx(12.0)
+    for k in ("R_in", "R_out", "W_swept", "W_turn", "d"):
+        assert r1[k] == pytest.approx(r0[k])
+
+
+def test_b12_W_turn_indicator():
+    # D4: W_turn=d+0.5，run_arc_scene 输出指标
+    r = hydraulic_turn_radii(_h_bundle(_h_trailer(axle_count=4, axle_spacing=1.5)))
+    assert r["W_turn"] == pytest.approx(r["d"] + 0.5)
+    res = run_scene(_h_bundle(_h_trailer(), outer=30.0, lane=7.0))
+    m = res.metrics
+    assert "B1_2_W_turn" in m and "B1_2_W_swept" in m and "B1_2_d" in m
+    assert m["B1_2_W_turn"] == pytest.approx(m["B1_2_W_swept"] + 0.5)
+
+
+def test_b12_active_lt2_fallback():
+    # 可转向轴<2 → 回退规范基准 + 告警
+    tl = _h_trailer(axle_count=3, locked_axles=[1, 2])
+    r = hydraulic_turn_radii(_h_bundle(tl))
+    assert r["spec_mode"] is True and "转向轴<2" in r["warnings"][-1]
+
+
+def test_arc_b12_indicator():
+    res = run_scene(_h_bundle(_h_trailer()))
+    m = res.metrics
+    for k in ("B1_2_W_turn", "B1_2_d", "B1_2_D_total", "B1_2_spec_mode",
+              "B1_2_warnings", "B1_2_theta_deg", "B1_2_base",
+              "trajectory_source"):
+        assert k in m
+    assert m["trajectory_source"] == "B.1.2"
+
+
+def test_b12_judgement_turn_channel_vs_road_width():
+    # D4 判定联动：转弯通道 W_turn 与路面宽比较进入宽度判据
+    # 窄车道时因 W_turn=d+0.5 超路面宽 → 判不通过
+    tl = _h_trailer(axle_count=4, axle_spacing=5.0)     # d=15,W_turn=15.5
+    res = run_scene(_h_bundle(tl, outer=40.0, lane=9.0))
+    # 查表(3级C半径>22、横向空间18>…)若不命中则落入验算；此用例确保不因异常而挂
+    assert isinstance(res.metrics["B1_2_W_turn"], float)
+    assert res.metrics["B1_2_W_turn"] == pytest.approx(15.5)
 
 
 # ---- M7: 垂直净空 ----

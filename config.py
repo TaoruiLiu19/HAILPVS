@@ -20,6 +20,11 @@ ACCEPTANCE_NOTE = (
 
 # ===== 判定常量（对标 JTG/T 2213—2023）=====
 TURN_SAFE_CLEARANCE = 0.5        # 转弯通道宽度安全宽度(m)，B.1.1-1 / B.1.2-1 中的 0.5
+# ---- B.1.2 液压轴线挂车 附加判据常量（D2/D6/D4）----
+MIN_TURN_ANGLE_DEG = 1.0         # θ 最小工程角(°)，防除零/无穷
+AXLE_STEER_ABS_LIMIT_DEG = 60.0  # θ 工程上限(°,D6 可配,≤89)，不承诺原地回转
+TURN_SAFE_CLEARANCE_B12 = 0.5    # B.1.2-1 安全宽度 a=0.5m(工程锚点，R外−R内≈d)
+HYDRAULIC_AXLE_DEFAULT_STEER_DEG = 45.0  # 默认 θ(第六章典型值)，界面可手动调整(D2)
 LATERAL_CLEARANCE_HIGH = 0.5     # 高速/一级/二级公路横向预留空间(m)，4.2.1
 LATERAL_CLEARANCE_LOW = 0.25     # 三级/四级公路横向预留空间(m)，4.2.1
 VERT_CLEARANCE_MARGIN = 0.1      # 垂直净空附加余量(m)——仅用于普通跨线构造物/上跨桥“宜0.1”

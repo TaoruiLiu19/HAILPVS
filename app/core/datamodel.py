@@ -34,7 +34,20 @@ class TrailerParams(BaseModel):
     front_overhang: float = Field(0.0, ge=0, description="前悬:铰接点→第一轴(m)")
     rear_overhang: float = Field(0.0, ge=0, description="后悬:最后一轴→车尾(m)")
     steering_type: str = "全轮强制转向"
-    locked_axles: list[int] = Field(default_factory=list, description="锁死轴列表(如[2,3])")
+    locked_axles: list[int] = Field(
+        default_factory=list,
+        description="锁死轴列表(1..Na,1=最前轴)。规范基准:仅中间不转轴、d=L(Na−1)不变;"
+                    "若含首/末轴则走规范外推 d=L(last_active−first_active)并告警(D1)")
+    axle_max_steering_angle_deg: float = Field(
+        45.0, gt=0, le=89,
+        description="液压轴线每轴最大转向角(°,D2 θ 来源,默认45=第六章典型值;"
+                    "D6 工程上限须<90°,不承诺原地回转)")
+    coupling_type: str = Field(
+        "鹅颈",
+        description='连接方式:仅绘图定位,取值 "鹅颈"|"连接杆";不参与任何判定(D8)')
+    coupling_length: float = Field(
+        0.0, ge=0,
+        description="连接部分长度(m):挂车车板前边沿→牵引车后边沿距离;仅绘图,不参与计算(D8)")
 
 
 class TractorParams(BaseModel):

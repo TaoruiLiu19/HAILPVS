@@ -145,7 +145,14 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
         if "B1_2_Rin" in m:
             rows.append(("液压挂车最内转弯半径 B.1.2 (m)", f"{m.get('B1_2_Rin',0):.3f}"))
             rows.append(("液压挂车最外转弯半径 B.1.2 (m)", f"{m.get('B1_2_Rout',0):.3f}"))
-            rows.append(("液压挂车扫空宽度 B.1.2 (m)", f"{m.get('B1_2_W',0):.3f}"))
+            rows.append(("液压挂车扫空宽度 W_swept B.1.2 (m)", f"{m.get('B1_2_W',0):.3f}"))
+            rows.append(("液压挂车转弯通道宽度 W_turn B.1.2 (m)", f"{m.get('B1_2_W_turn',0):.3f}"))
+            rows.append(("液压 θ(首轴最大转向角) B.1.2 (°)", f"{m.get('B1_2_theta_deg',0):.3f}"))
+            rows.append(("液压车板总长 D_总 (m)", f"{m.get('B1_2_D_total',0):.3f}"))
+            rows.append(("B.1.2 口径",
+                         "严格守规范" if m.get('B1_2_spec_mode', True)
+                         else "规范外推(首/末轴锁死)"))
+            rows.append(("轨迹/扫空来源", m.get('trajectory_source', '')))
     else:
         rows.append(("弯道类型", "直角弯道(平面交叉转弯)"))
         rows.append(("入口宽度 W_en (m)", f"{m.get('entry_width',0):.3f}"))

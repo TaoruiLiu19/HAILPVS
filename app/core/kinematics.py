@@ -10,6 +10,8 @@ from __future__ import annotations
 import itertools
 import math
 
+from config import (MIN_TURN_ANGLE_DEG, AXLE_STEER_ABS_LIMIT_DEG,
+                    TURN_SAFE_CLEARANCE_B12)
 from .datamodel import InputBundle
 
 
@@ -180,37 +182,85 @@ def build_trajectory_geoms(kin: TractorTrailerKinematics, frames,
 # B.1.2 液压轴线挂车（多轴多轮液压悬挂挂车）闭式解
 # =====================================================================
 def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None):
-    """按规范附录 B.1.2 闭式解求液压悬挂挂车的转弯半径与扫空宽度。
+    """按规范附录 B.1.2 闭式解求液压悬挂挂车的转弯半径、扫空宽度与转弯通道宽度。
 
     中间一轴（或中间两轴）锁死不转向、首尾轴全轮强制转向，各轮绕同一瞬时
     转动中心做圆周运动：
-      R_in  = L轮挂·(Na−1)/(2·tanθ) + (D总−d)/2        式(B.1.2-4)
-      R_out = L轮挂·(Na−1)/(2·tanθ) + (D总+d)/2        式(B.1.2-5)
-      W     = R_out − R_in = d                           式(B.1.2-6)
-    式中 L轮挂 为相邻轴线间距（取数据模型 axle_spacing），首末轴间距
-    = L轮挂·(Na−1)；d 为规范"液压悬挂挂车轴距"，即首末轴间距 = L轮挂·(Na−1)，
-    与 base 中展开的首末轴间距同量纲。θ 为第一轴线内侧轮胎转向角，受
-    最大转向角约束保守取 45° 限值。返回字典：R_in/R_out(车货总体最内/最外
-    转弯半径)、W(扫空空间宽度)、base、theta_deg、W_tire_in(内轮半径)。
+      base  = d/(2·tanθ)                           瞬心横向偏距(≈瞬心半径)
+      R_in  = base + (D总−d)/2         式(B.1.2-4)
+      R_out = base + (D总+d)/2         式(B.1.2-5)
+      W_swept = R_out − R_in = d       式(B.1.2-6)  车货总体扫空空间宽度
+      W_turn  = d + 0.5                式(B.1.2-1)  转弯通道宽度(工程锚点)
+    式中 d = L轮挂·(断末有效轴距)，L轮挂 为相邻轴线间距(axle_spacing)；
+    D总 = 车板长(trailer.length, D3)。θ = 第一轴线内侧轮胎转向角(D2)，
+    来源为挂车轴结构最大转向角 axle_max_steering_angle_deg，受工程上限
+    AXLE_STEER_ABS_LIMIT_DEG 钳制(D6)，下端受 MIN_TURN_ANGLE_DEG 防除零。
+
+    D1 locked_axles 双口径：默认严格守规范(中间锁死不改变 d)；仅当锁死轴
+    含首/末轴时走规范外推，d=L(last_active−first_active) 并告警。
+    返回字典：R_in/R_out、W_swept、W_turn、base、theta_deg、d、D_total、
+    spec_mode、locked、sweep_center_dist(=base,D5 瞬心偏距)、warnings。
     """
-    import math
     tl = bundle.trailer
-    tr = bundle.tractor
     na = max(int(tl.axle_count), 2)
-    l_wheel = tl.axle_spacing              # L轮挂：相邻轴线间距
-    d = l_wheel * (na - 1)                 # d：首末轴间距 = L轮挂·(Na−1)（规范"挂车轴距"）
-    d_total = tl.length                     # D总：液压悬挂挂车总长度
-    theta_max = math.radians(min(
-        getattr(tr, "max_steering_angle_deg", 45.0), 45.0))
-    theta = turn_angle_theta if turn_angle_theta is not None else theta_max
-    theta = max(1e-4, math.radians(min(math.degrees(theta), 45.0)))
-    base = l_wheel * (na - 1) / (2.0 * math.tan(theta))   # = d/(2·tanθ)
-    r_in = base + (d_total - d) / 2.0       # B.1.2-4
-    r_out = base + (d_total + d) / 2.0      # B.1.2-5
-    w_swept = r_out - r_in                  # B.1.2-6 = d（首末轴间距）
+    L = tl.axle_spacing                       # L轮挂：相邻轴线间距
+    # D3/D8: D_total = 车板长(length)，不含牛颈/连接杆耦合段(耦合仅绘图、不入判定)
+    d_total = max(float(tl.length), L * (na - 1))
+
+    # D1：首/末轴锁死 → 规范外推；纯中间锁死 → 严格守规范(d 不变)
+    locked = sorted({int(a) for a in tl.locked_axles if 1 <= int(a) <= na})
+    first, last, spec_mode = 1, na, True
+    if (1 in locked) or (na in locked):
+        active = [i for i in range(1, na + 1) if i not in locked]
+        if active:
+            first, last = min(active), max(active)
+        spec_mode = False
+    d = L * (last - first)
+    if d <= 0:                                # active 转向轴<2 等退化：回退规范基准
+        d = L * (na - 1)
+        spec_mode = True
+
+    # D2/D6：θ 取自挂车轴结构最大转向角，受工程上限与下端 1° 钳制
+    theta_max_deg = min(float(tl.axle_max_steering_angle_deg),
+                        AXLE_STEER_ABS_LIMIT_DEG)
+    theta_deg = (turn_angle_theta if turn_angle_theta is not None
+                 else theta_max_deg)
+    theta_deg = max(MIN_TURN_ANGLE_DEG, min(theta_deg, AXLE_STEER_ABS_LIMIT_DEG))
+    theta = math.radians(theta_deg)
+
+    base = d / (2.0 * math.tan(theta))        # = d/(2·tanθ)，瞬心偏距
+    r_in = base + (d_total - d) / 2.0          # B.1.2-4
+    r_out = base + (d_total + d) / 2.0         # B.1.2-5
+    w_swept = r_out - r_in                     # B.1.2-6 = d
+    w_turn = d + TURN_SAFE_CLEARANCE_B12       # B.1.2-1 工程锚点，OCR 待复核
+
+    warnings_ = []
+    if not spec_mode:
+        warnings_.append(
+            f"首/末轴锁死({locked}):d 按 active 首末={d:.3f}m 外推,属规范外推、保守")
+    active_count = len([i for i in range(1, na + 1) if i not in locked])
+    if active_count < 2:
+        warnings_.append("active 转向轴<2,回退规范基准")
+
     return {
-        "R_in": r_in, "R_out": r_out, "W": w_swept,
-        "base": base, "theta_deg": math.degrees(theta),
-        "W_tire_in": base,
-        "turn_ok_geo": w_swept > 0,
+        "R_in": r_in, "R_out": r_out,
+        "W_swept": w_swept, "W_turn": w_turn,
+        "base": base, "theta_deg": round(theta_deg, 4),
+        "d": d, "D_total": d_total,
+        "spec_mode": spec_mode, "locked": locked,
+        "sweep_center_dist": base,      # D5 瞬心横向偏距(轨迹层用)
+        "warnings": warnings_,
     }
+
+
+def hydraulic_coupling_draw_anchor(bundle: InputBundle, tractor_rear_x,
+                                   tractor_rear_y, psi):
+    """D8: 仅绘图。返回挂车车板前端锚点(相对牵引车后沿偏移 coupling_length)。
+
+    牵引车后边沿 + 连接部分长度·挂车航向 → 挂车车板前端；车板自前端向后延伸
+    length 得到车尾。不参与 D_total/R/W_swept/W_turn 计算，仅影响绘图定位。
+    """
+    tl = bundle.trailer
+    off = float(tl.coupling_length or 0.0)
+    return (tractor_rear_x + off * math.cos(psi),
+            tractor_rear_y + off * math.sin(psi))
