@@ -182,8 +182,17 @@ def build_trajectory_geoms(kin: TractorTrailerKinematics, frames,
                        tr_pts)                                            # 挂车车板
         _km._rect_into(cx, cy, ps, k.b.cargo.length, k.b.cargo.width,
                        cg_pts)                                            # 货物
-        _km._rect_into(k.x, k.y, k.theta, k.wheelbase + 1.0,
-                       k.b.tractor.width, tb_pts)                         # 牵引车
+        if b12 is not None:
+            # 液压车：车头与车板连接与圆弧弯一致 —— 短头经耦合段前置于车板前
+            head_len = k.wheelbase + 1.0
+            coupl = float(k.b.trailer.coupling_length or 0.0)
+            ahead = k.b.trailer.length / 2.0 + coupl + head_len / 2.0
+            trcx = cx + ahead * math.cos(ps)
+            trcy = cy + ahead * math.sin(ps)
+            _km._rect_into(trcx, trcy, ps, head_len, k.b.tractor.width, tb_pts)
+        else:
+            _km._rect_into(k.x, k.y, k.theta, k.wheelbase + 1.0,
+                           k.b.tractor.width, tb_pts)                     # 牵引车
         geom = MultiPolygon([Polygon(env_pts), Polygon(tb_pts)])
         if b12 is not None:
             tl = k.b.trailer
@@ -324,33 +333,47 @@ def axle_steering_geoms(base_x, base_y, psi, trailer, rho,
     ca, sa = math.cos(psi), math.sin(psi)
     half_len = float(trailer.length) / 2.0
     front_oh = float(trailer.front_overhang)
-    # 第六章图式：奇数 Axis 中间 1 根为闭锁轴（自动 δ=0），偶数轴无闭锁轴
-    auto_midlock = (na % 2 == 1) and ((na + 1) // 2) not in lock
+    rear_oh = float(trailer.rear_overhang)
+
+    # 绘制三组代表轴（第六章图式）：一组靠近车头、一组居中、一组靠近车尾。
+    # 界面仅提供 车板长/轴数/轴距（无前/后悬），故默认把三组分铺到车板前/中/后段，
+    # 各组各内收 1m；仅当显式给出前/后悬时才按悬长锚定。
+    _INSET = 1.0
+    front_off = half_len - (front_oh if front_oh > 0.0 else _INSET)
+    rear_off = -(half_len - (rear_oh if rear_oh > 0.0 else _INSET))
+    mid_off = (front_off + rear_off) / 2.0
+
+    mid_i = (na + 1) // 2
+    auto_midlock = (na % 2 == 1) and (mid_i not in lock)
+
+    # 三组：首(first→前)/中(mid_i)/末(last→后)；na 过小(首中末重合)时去重
+    keys = []
+    for k in (first, mid_i, last):
+        if k not in keys:
+            keys.append(k)
+
     all_axles = []
-    for i in range(1, na + 1):
-        # 轴 i 距车板中心的前向偏移(向前为正)：车板前端向前 half_len，
-        # 自前端向后 front_overhang+(i−1)·spacing → 轴在该处
-        off = half_len - front_oh - (i - 1) * spacing
+    for i in keys:
+        if i == first:
+            off = front_off       # 前
+        elif i == last:
+            off = rear_off        # 后
+        else:
+            off = mid_off         # 中
         cx = base_x + off * ca
         cy = base_y + off * sa
-        is_midlock = (i == (na + 1) // 2) and auto_midlock
-        if i in lock or is_midlock:
-            theta_i = 0.0
+        # 中间组是枢轴中心行 → δ=0（奇轴中间=自动闭锁、偶轴中间=枢轴不转向）；
+        # 首/末组按瞬心几何偏转（前正后负）；锁死轴 δ=0 并标记。
+        if i in lock:
+            theta_i, is_lock = 0.0, True
+        elif i == mid_i and i != first and i != last:
+            theta_i, is_lock = 0.0, auto_midlock
         else:
-            theta_i = math.degrees(math.atan((pos[i] - a_center) / max(rho, 1e-6)))
-            theta_i = max(-max_delta, min(max_delta, theta_i))
-        all_axles.append((i, cx, cy, theta_i, half_track, i in lock or is_midlock))
-
-    def _pick():
-        sel = {first, last}
-        if "midlock" in want and na % 2 == 1:
-            m = (na + 1) // 2
-            if 1 <= m <= na:
-                sel.add(m)
-        return sel
-
-    sel = _pick()
-    return [a for a in all_axles if a[0] in sel]
+            d = math.degrees(math.atan((a_center - pos[i]) / max(rho, 1e-6)))
+            d = max(-max_delta, min(max_delta, d))
+            theta_i, is_lock = d, False
+        all_axles.append((i, cx, cy, theta_i, half_track, is_lock))
+    return all_axles
 
 
 def hydraulic_arc_trajectory(bundle: InputBundle, b12, radius, turn_deg,
@@ -392,9 +415,9 @@ def hydraulic_arc_trajectory(bundle: InputBundle, b12, radius, turn_deg,
     end_psi = math.radians(90.0) + turn_rad
     ex, ey = frames[-1][0], frames[-1][1]
     for j in range(1, line_pts + 1):
-        frames.append((ex + (straight * j / line_pts) * math.cos(end_psi),
-                       ey + (straight * j / line_pts) * math.sin(end_psi),
-                       end_psi, rho, (ex, ey)))
+        px = ex + (straight * j / line_pts) * math.cos(end_psi)
+        py = ey + (straight * j / line_pts) * math.sin(end_psi)
+        frames.append((px, py, end_psi, rho, (px, py)))
 
     vgeoms = []
     for x, y, psi, rho_f, ctr in frames:
@@ -423,9 +446,12 @@ def _rigid_hydra_geoms(bundle, ctr_x, ctr_y, psi):
     _rect_into(ctr_x, ctr_y, psi, tl.length, tl.width, tr_pts)
     _rect_into(ctr_x, ctr_y, psi, cargo.length, cargo.width, cg_pts)
     _rect_into(ctr_x, ctr_y, psi, env_len, env_w, env_pts)
-    ahead = tl.length / 2.0 + float(tl.coupling_length or 0.0) + trw.length / 2.0
+    # 牵引车画成明显的短头车（与机械铰接画法一致：wheelbase+1 ≈ 5m），
+    # 避免 8m 整车框在弧形场景里看起来与板车等长
+    head_len = trw.wheelbase + 1.0
+    ahead = tl.length / 2.0 + float(tl.coupling_length or 0.0) + head_len / 2.0
     trcx = ctr_x + ahead * math.cos(psi)
     trcy = ctr_y + ahead * math.sin(psi)
-    _rect_into(trcx, trcy, psi, trw.length, trw.width, tb_pts)
+    _rect_into(trcx, trcy, psi, head_len, trw.width, tb_pts)
     geom = MultiPolygon([Polygon(env_pts), Polygon(tb_pts)])
     return geom, Polygon(tr_pts), Polygon(cg_pts)

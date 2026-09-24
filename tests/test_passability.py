@@ -246,17 +246,18 @@ def test_b12_theta_upperbound():
 
 
 def test_axle_steering_geoms_positions_precise():
-    # 轴位精确到瞬心/车板坐标：第 i 轴距车板中心前向偏移 = length/2 − front_overhang
-    # − (i−1)·spacing。front_overhang=2 时首轴应前移 length/2−2=4，末轴(length/2−2−3·spacing)
-    # 由 front_overhang / coupling 唯一决定（D7/D8）。
+    # 轴位精确到瞬心/车板坐标：三组代表轴（前/中/后）分铺车板；
+    # front_overhang 可把首组整体后移（D7/D8），否则默认各内收 1m。
     tl = _h_trailer(axle_count=4, axle_spacing=1.5, length=12.0,
                     front_overhang=2.0)
     ax = axle_steering_geoms(0.0, 0.0, 0.0, tl, 10.0, na=4)
-    # psi=0 → 前向=+x；首轴 cx = 0 + (6−2−0) = 4.0
+    # psi=0 → 前向=+x；首轴 cx = 6−2 = 4.0；中轴居中；末轴 = −(6 − 内收1) = −5.0
     first = next(a for a in ax if a[0] == 1)
     assert first[1] == pytest.approx(6.0 - 2.0, abs=1e-9)
+    mid = next(a for a in ax if a[0] == 2)
+    assert mid[1] == pytest.approx((6.0 - 2.0 - 5.0) / 2.0, abs=1e-9)
     last = next(a for a in ax if a[0] == 4)
-    assert last[1] == pytest.approx(6.0 - 2.0 - 3 * 1.5, abs=1e-9)
+    assert last[1] == pytest.approx(-5.0, abs=1e-9)
 
 
 def test_axle_tire_count_in_frames():
@@ -401,14 +402,18 @@ def test_axle_draw_odd_axles():
 
 
 def test_axle_draw_even_axles():
-    # 偶轴 N_a → 只首轴 + 末轴，无闭锁轴(δ=0 仅当用户显式锁死)
+    # 偶轴 N_a → 仍是 前/中/后 三组代表轴（第六章图式）；中间组为枢轴中心 δ=0
     tl = _h_trailer(axle_count=4)
     axles = axle_steering_geoms(0.0, 0.0, 0.0, tl, 10.0, na=4)
-    assert [a[0] for a in axles] == [1, 4]
+    assert [a[0] for a in axles] == [1, 2, 4]
+    mid = next(a for a in axles if a[0] == 2)
+    assert mid[3] == 0.0 and mid[5] is False   # 中间=枢轴，δ=0，非闭锁
     axles_locked = axle_steering_geoms(0.0, 0.0, 0.0, tl, 10.0, na=4,
                                        locked_axles=[2])
-    # 显式锁死才可能出 δ=0，且中间闭锁轴不在默认绘制集
-    assert 2 not in [a[0] for a in axles_locked]
+    # 用户显式锁死中间轴 → 中间组标记为锁死且 δ=0
+    assert 2 in [a[0] for a in axles_locked]
+    m2 = next(a for a in axles_locked if a[0] == 2)
+    assert m2[3] == 0.0 and m2[5] is True
 
 
 def test_hydra_arc_trajectory_frames_have_axles():

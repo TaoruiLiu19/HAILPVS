@@ -30,7 +30,6 @@ CENTER_COLOR = "#e02020"      # 关键参考点：红色十字
 TEXT_COLOR = "#0d47a1"        # 标注文字：与标注线同色（深蓝）
 SPINE_COLOR = "#b8c0c8"       # 坐标轴细线：浅灰
 AXLE_COLOR = "#7b3fe4"        # 液压车轴段/转向轮：紫色（区别于机械车黑色轮廓）
-LOCKED_TEXT_COLOR = "#c53030" # 闭锁轴文字：红色
 
 # 构造弧(扫掠 R_o/R_i)相对道路边界的向内留隙(m)：避免半径弧贴近/压过内缘线
 _SWEPT_ARC_INSET = 0.5
@@ -112,10 +111,6 @@ def _plot_steered_axle(ax, cx, cy, psi, delta_deg, half_track, locked,
                        (wx + (hx * tca - hy * tsa), wy + (hx * tsa + hy * tca)),
                        (wx + (-hx * tca - hy * tsa), wy + (-hx * tsa + hy * tca))]
             _plot_ring(ax, corners, color, 1.0)
-    if locked:
-        ax.text(cx + 2 * nx * half_track, cy + 2 * ny * half_track, "闭锁",
-                color=LOCKED_TEXT_COLOR, fontsize=7, ha="center", va="center",
-                family="Microsoft YaHei", zorder=5)
 
 
 def _annotate_radius(ax, center, radius, span_deg, label, side, road=None,
@@ -206,11 +201,13 @@ def _annotate_angle(ax, center, ang_deg, radius, label, start_deg=0.0):
             bbox=dict(facecolor="white", edgecolor="none", pad=1.2), zorder=4)
 
 
-def _annotate_rect_dims(ax, geom, prefix, offset, color=DIM_COLOR, text_off=1.7):
-    """CAD 长/宽尺寸标注：沿矩形几何相邻两条临边外沿偏移画带箭头的尺寸线。
+def _annotate_rect_dims(ax, geom, prefix, offset, color=DIM_COLOR, text_off=1.7,
+                        rear_anchor=None):
+    """CAD 长/宽尺寸标注：长度沿最长边、宽度沿“尾部”短边。
 
-    offset 为尺寸线相对轮廓的垂直偏移（越大越远离车体/货物，避开图形主体）；
-    prefix 用于区分“车”“货”，数字不带单位（统一视为 m）。
+    长度尺寸线沿矩形最长边外移 offset；宽度尺寸线移到车尾侧的短边（即离
+    rear_anchor=牵引车形心 最远的一条短边），避免宽度标注压到车头/牵引车。
+    offset 为尺寸线相对轮廓的垂直偏移；prefix 区分“车”“货”；数字不带单位。
     """
     pts = list(geom.exterior.coords)[:4]
     cx = sum(p[0] for p in pts) / 4.0
@@ -225,12 +222,24 @@ def _annotate_rect_dims(ax, geom, prefix, offset, color=DIM_COLOR, text_off=1.7)
         mx, my = (a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0
         if nx * (mx - cx) + ny * (my - cy) < 0:   # 取背离形心的外法向
             nx, ny = -nx, -ny
-        E.append((a, b, ux, uy, nx, ny, L))
+        E.append([a, b, ux, uy, nx, ny, L, mx, my])
 
-    is_long0 = E[0][6] >= E[1][6]
-    for idx, tag in ((0, "长" if is_long0 else "宽"),
-                     (1, "宽" if is_long0 else "长")):
-        a, b, _ux, _uy, nx, ny, L = E[idx]
+    E.sort(key=lambda e: e[6], reverse=True)        # 长度降序
+    len_e = E[0]                                   # 最长边 = 尺寸“长”
+    short_edges = [e for e in E[1:] if e[6] < len_e[6] - 1e-6]
+    if not short_edges:
+        width_e = len_e                            # 正方形：长宽同边
+    elif rear_anchor is not None:
+        # 尾部短边 = 离车头锚点最远的那条短边
+        width_e = max(short_edges, key=lambda e:
+                      math.hypot(e[7] - rear_anchor[0], e[8] - rear_anchor[1]))
+    else:
+        width_e = short_edges[0]
+
+    for e, tag in ((len_e, "长"), (width_e, "宽")):
+        if width_e is len_e and len_e is width_e:
+            continue                               # 正方形仅标一条
+        a, b, _ux, _uy, nx, ny, L, _mx, _my = e
         oa = (a[0] + nx * offset, a[1] + ny * offset)
         ob = (b[0] + nx * offset, b[1] + ny * offset)
         ax.plot([a[0], oa[0]], [a[1], oa[1]], color=color, linewidth=0.6, zorder=3)
@@ -288,8 +297,13 @@ def draw_sweep_view(res: SweepScenarioResult, out_path, dpi=PLOT_DPI,
     # —— 车辆/货物尺寸标注：沿“入弯前第一辆车”的外沿画 CAD 长/宽尺寸线 ——
     if res.vehicle_frames:
         _first = res.vehicle_frames[0]       # 第一辆车 = 入弯前的初始轮廓
-        _annotate_rect_dims(ax, _first[3], "车", 3.2, color=DIM_COLOR)
-        _annotate_rect_dims(ax, _first[4], "货", 6.6, color=DIM_COLOR, text_off=1.9)
+        _fg = _first[2].geoms if _first[2].geom_type == "MultiPolygon" else [_first[2]]
+        # 以牵引车形心为“车头”锚点，让宽度标注落在车尾侧、避开牵引车
+        rear_anchor = (_fg[-1].centroid.x, _fg[-1].centroid.y) if _fg else None
+        _annotate_rect_dims(ax, _first[3], "车", 3.2, color=DIM_COLOR,
+                            rear_anchor=rear_anchor)
+        _annotate_rect_dims(ax, _first[4], "货", 6.6, color=DIM_COLOR,
+                            text_off=1.9, rear_anchor=rear_anchor)
 
     # Layer 4: 转弯圆心红色十字 + 扫掠半径 / 道路曲线半径 标注（数字无单位，统一为 m）
     metrics = res.metrics

@@ -16,7 +16,7 @@ from PyQt5.QtGui import QPixmap
 
 from config import (APP_NAME, APP_VERSION, ROAD_TYPES, TRAILER_TYPES,
                     ACCEPTANCE_NOTE, EXPORT_PWD, MODEL_SUFFIX,
-                    HIGHWAY_GRADES)
+                    HIGHWAY_GRADES, HYDRAULIC_AXLE_DEFAULT_STEER_DEG)
 try:
     from config import PAD_ITEMS
 except ImportError:
@@ -59,8 +59,11 @@ _TRAILER_FIELDS = [
     ("挂车轴数", "t_axle_count", "axle_count", True),
     ("挂车轴距(m)", "t_axle_spacing", "axle_spacing", True),
     ("轮距(m)", "t_track_width", "track_width", True),
-    ("每轴最大转向角(°)(液压)", "t_axle_steer_deg", "axle_max_steering_angle_deg", True),
-    ("连接部分长度(m)(液压)", "t_coupling_length", "coupling_length", True),
+]
+# 仅液压轴线挂车显示的参数（选挂车类型=液压后整组可见）；标签不带“(液压)”后缀
+_HYDRAULIC_TRAILER_FIELDS = [
+    ("每轴最大转向角(°)", "t_axle_steer_deg", "axle_max_steering_angle_deg", True),
+    ("连接部分长度(m)", "t_coupling_length", "coupling_length", True),
 ]
 _TRACTOR_FIELDS = [
     ("牵引车轴距(m)", "tr_wheelbase", "wheelbase", True),
@@ -76,7 +79,7 @@ _RIGHT_FIELDS = [
     ("入口宽度(m)", "entry_width", True),
     ("出口宽度(m)", "exit_width", True),
     ("弯道内半径(m)", "corner_radius", True),
-    ("交角(°)", "intersection_angle_deg", True),
+    # 交角固定为 90°（直角弯道），不再提供输入
 ]
 
 
@@ -237,12 +240,22 @@ class MainWindow(QMainWindow):
             ed = _new_edit("0.0")
             self.edits[key] = ed
             f_t.addRow(_row_label(f"{label}："), ed)
-        self.cmb_coupling_type = _new_combo(("鹅颈", "连接杆"), "鹅颈")
-        f_t.addRow(_row_label("连接方式(液压)："), self.cmb_coupling_type)
-        # 液压每轴最大转向角默认取第六章典型值 45°（B.1.2 D2，界面可调）
+        # 液压轴线挂车参数整组：仅选“液压轴线挂车”后可见（标签不带“(液压)”后缀）
+        g_hyd, f_hyd = _make_form_group("液压轴线挂车参数")
+        for label, key, field, numeric in _HYDRAULIC_TRAILER_FIELDS:
+            ed = _new_edit("0.0")
+            self.edits[key] = ed
+            f_hyd.addRow(_row_label(f"{label}："), ed)
+        # 每轴最大转向角默认取第六章典型值（B.1.2 D2，界面可调）
         if "t_axle_steer_deg" in self.edits:
-            self.edits["t_axle_steer_deg"].setText("45.0")
+            self.edits["t_axle_steer_deg"].setText(str(HYDRAULIC_AXLE_DEFAULT_STEER_DEG))
+        self.cmb_coupling_type = _new_combo(("鹅颈", "连接杆"), "鹅颈")
+        f_hyd.addRow(_row_label("连接方式："), self.cmb_coupling_type)
         v.addWidget(g_t)
+        v.addWidget(g_hyd)
+        self.g_hyd = g_hyd
+        self.cmb_trailer_type.currentTextChanged.connect(self._sync_hydraulic_fields)
+        self._sync_hydraulic_fields()
 
         # 3. 牵引车参数
         g_car, f_car = _make_form_group("3. 牵引车参数")
@@ -318,6 +331,10 @@ class MainWindow(QMainWindow):
         self.g_arc.setVisible(is_arc)
         self.g_right.setVisible(not is_arc)
 
+    def _sync_hydraulic_fields(self):
+        # 液压轴线挂车参数整组仅在选择“液压轴线挂车”后显示
+        self.g_hyd.setVisible(self.cmb_trailer_type.currentText() == "液压轴线挂车")
+
     # ================= 状态徽章 =================
     def set_status_badge(self, state):
         text, bg, fg = self._STATUS_STYLE.get(state, self._STATUS_STYLE["none"])
@@ -386,7 +403,7 @@ class MainWindow(QMainWindow):
                                   entry_width=self._f_right("entry_width"),
                                   exit_width=self._f_right("exit_width"),
                                   corner_radius=self._f_right("corner_radius"),
-                                  intersection_angle_deg=self._f_right("intersection_angle_deg")),
+                                  intersection_angle_deg=90.0),
                               vertical_clearance=self._f("vertical_clearance"),
                               highway_grade=grade)
         return InputBundle(cargo=cargo, trailer=trailer, tractor=tractor, road=road,
