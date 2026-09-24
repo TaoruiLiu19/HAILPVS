@@ -151,13 +151,14 @@ def build_trajectory_geoms(kin: TractorTrailerKinematics, frames,
     机械车（b12=None）返回 5 元组：
       (x, y, geom, trailer_geom, cargo_geom)：
       x/y            帧参考点（牵引车状态点，抽帧绘制定位）；
-      geom           整车扫掠几何（挂车+货物合并矩形 ∪ 牵引车矩形，用于包络计算）；
+      geom           整车扫掠几何（机械=挂车+货物合并矩形 ∪ 牵引车矩形；
+                     液压 b12 时=仅车板+货物包络，不含牵引车，用于包络计算）；
       trailer_geom   挂车车板独立矩形（绘制：蓝色车架）；
       cargo_geom     货物独立矩形（绘制：超宽/超长时黑色轮廓凸出车板可见）。
 
     液压车（传入 b12，D5/§4.5 直角弯复用瞬心）追加第 6 元 axle_geoms：
       (x, y, geom, trailer_geom, cargo_geom, axle_geoms)，供绘制各轴转向层；
-      判定 5.2.1 口径不动（仅可视化）。
+      判定 5.2.1 口径不动（仅可视化）；车头不入 geom，扫掠与圆弧弯口径一致。
     """
     import copy
 
@@ -183,17 +184,13 @@ def build_trajectory_geoms(kin: TractorTrailerKinematics, frames,
         _km._rect_into(cx, cy, ps, k.b.cargo.length, k.b.cargo.width,
                        cg_pts)                                            # 货物
         if b12 is not None:
-            # 液压车：车头与车板连接与圆弧弯一致 —— 短头经耦合段前置于车板前
-            head_len = k.wheelbase + 1.0
-            coupl = float(k.b.trailer.coupling_length or 0.0)
-            ahead = k.b.trailer.length / 2.0 + coupl + head_len / 2.0
-            trcx = cx + ahead * math.cos(ps)
-            trcy = cy + ahead * math.sin(ps)
-            _km._rect_into(trcx, trcy, ps, head_len, k.b.tractor.width, tb_pts)
+            # 液压车：板车全轮转向自带瞬心，车头不入包络/判定（与圆弧弯 D5 口径一致），
+            # 扫掠仅车板+货物包络，不并入牵引车
+            geom = Polygon(env_pts)
         else:
             _km._rect_into(k.x, k.y, k.theta, k.wheelbase + 1.0,
                            k.b.tractor.width, tb_pts)                     # 牵引车
-        geom = MultiPolygon([Polygon(env_pts), Polygon(tb_pts)])
+            geom = MultiPolygon([Polygon(env_pts), Polygon(tb_pts)])
         if b12 is not None:
             tl = k.b.trailer
             rho = b12["sweep_center_dist"]
@@ -468,24 +465,21 @@ def hydraulic_arc_trajectory(bundle: InputBundle, b12, radius, turn_deg,
 
 
 def _rigid_hydra_geoms(bundle, ctr_x, ctr_y, psi):
-    """刚体帧几何：挂车/货物/牵引车各自一个矩形(避免帧内自交)。"""
-    from shapely.geometry import Polygon, MultiPolygon
+    """刚体帧几何：挂车/货物包络框各一个矩形(避免帧内自交)。
+
+    液压轴线板车按 B.1.2 自转模型：车板全轮转向自带瞬心，扫掠/判定均为
+    绕车板自身瞬心的刚体圆周，**不并入独立牵引车**——扫掠包络仅含车板+货物，
+    车头既不入包络也不参与判定（区别于机械铰接路径 build_trajectory_geoms）。
+    """
+    from shapely.geometry import Polygon
 
     tl = bundle.trailer
     cargo = bundle.cargo
-    trw = bundle.tractor
     env_len = max(tl.length, cargo.length)
     env_w = max(tl.width, cargo.width)
-    tr_pts, cg_pts, env_pts, tb_pts = [], [], [], []
+    tr_pts, cg_pts, env_pts = [], [], []
     _rect_into(ctr_x, ctr_y, psi, tl.length, tl.width, tr_pts)
     _rect_into(ctr_x, ctr_y, psi, cargo.length, cargo.width, cg_pts)
     _rect_into(ctr_x, ctr_y, psi, env_len, env_w, env_pts)
-    # 牵引车画成明显的短头车（与机械铰接画法一致：wheelbase+1 ≈ 5m），
-    # 避免 8m 整车框在弧形场景里看起来与板车等长
-    head_len = trw.wheelbase + 1.0
-    ahead = tl.length / 2.0 + float(tl.coupling_length or 0.0) + head_len / 2.0
-    trcx = ctr_x + ahead * math.cos(psi)
-    trcy = ctr_y + ahead * math.sin(psi)
-    _rect_into(trcx, trcy, psi, head_len, trw.width, tb_pts)
-    geom = MultiPolygon([Polygon(env_pts), Polygon(tb_pts)])
+    geom = Polygon(env_pts)
     return geom, Polygon(tr_pts), Polygon(cg_pts)

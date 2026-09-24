@@ -255,6 +255,26 @@ def _annotate_rect_dims(ax, geom, prefix, offset, color=DIM_COLOR, text_off=1.7,
                 bbox=dict(facecolor="white", edgecolor="none", pad=1.0), zorder=4)
 
 
+def _hydraulic_front_anchor(trailer_geom, frame0, frame1):
+    """液压车（无牵引车图形）的“车头前端”锚点，使宽度标注稳定落向车尾。
+
+    用首帧行驶方向(后一帧位置−首帧位置)作为车板纵向前向，把锚点放在车板
+    前端短边外侧；_annotate_rect_dims 取距它最远的短边 = 车尾短边。
+    """
+    ux, uy = 0.0, 1.0
+    if frame1 is not None:
+        dx, dy = frame1[0] - frame0[0], frame1[1] - frame0[1]
+        dl = math.hypot(dx, dy)
+        if dl > 1e-6:
+            ux, uy = dx / dl, dy / dl
+    pts = list(trailer_geom.exterior.coords)[:4]
+    half_len = max(math.hypot(pts[i][0] - pts[(i + 1) % 4][0],
+                              pts[i][1] - pts[(i + 1) % 4][1])
+                  for i in range(4)) / 2.0
+    c = trailer_geom.centroid
+    return (c.x + ux * (half_len + 0.5), c.y + uy * (half_len + 0.5))
+
+
 def draw_sweep_view(res: SweepScenarioResult, out_path, dpi=PLOT_DPI,
                     figsize=(12, 10)):
     """绘制 CAD 线框风格扫掠工程图。返回图路径。"""
@@ -299,8 +319,13 @@ def draw_sweep_view(res: SweepScenarioResult, out_path, dpi=PLOT_DPI,
     if res.vehicle_frames:
         _first = res.vehicle_frames[0]       # 第一辆车 = 入弯前的初始轮廓
         _fg = _first[2].geoms if _first[2].geom_type == "MultiPolygon" else [_first[2]]
-        # 以牵引车形心为“车头”锚点，让宽度标注落在车尾侧、避开牵引车
-        rear_anchor = (_fg[-1].centroid.x, _fg[-1].centroid.y) if _fg else None
+        if len(_fg) >= 2:
+            # 机械车：以牵引车形心为“车头”锚点，宽度标注落在车尾侧、避开车头
+            rear_anchor = (_fg[-1].centroid.x, _fg[-1].centroid.y)
+        else:
+            # 液压车（无车头图形）：按首帧行驶方向合成车头前端锚点，宽度线落向车尾
+            _nf = res.vehicle_frames[1] if len(res.vehicle_frames) > 1 else None
+            rear_anchor = _hydraulic_front_anchor(_first[3], _first, _nf)
         _annotate_rect_dims(ax, _first[3], "车", 3.2, color=DIM_COLOR,
                             rear_anchor=rear_anchor)
         _annotate_rect_dims(ax, _first[4], "货", 6.6, color=DIM_COLOR,

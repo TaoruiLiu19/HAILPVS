@@ -376,12 +376,12 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
     trajectory_source = "铰接尾随"
     if _is_hydraulic(bundle):
         b12 = hydraulic_turn_radii(bundle)
-        # B.1.2 口径优先：扫空=W_swept(=d)、转弯通道=W_turn=d+0.5
-        # 轨迹/扫掠按 B.1.2 瞬心刚体圆周生成(D5)，区别于机械车铰接尾随——
-        # 液压车沿道路中心线半径 r_path 做刚体圆周，包络更紧凑
+        # B.1.2 口径：轨迹/扫掠按瞬心刚体圆周生成(D5)；扫空与转弯通道判据均取
+        # 整车扫空宽度 Wd(B.1.2-6,含货宽与安全宽 σ),不使用轮迹带 W_z(B.1.2-1)——
+        # 轮迹只反映轮胎通道,会漏掉超出车宽的超宽货物,导致"M1所需宽度"失真
         trajectory_source = "B.1.2"
         swept_w = b12["W_swept"]
-        turn_channel_w = b12["W_turn"]
+        turn_channel_w = b12["W_swept"]
         vgeoms, swept = hydraulic_arc_trajectory(bundle, b12, r_path, _TURN_DEG)
     else:
         # B.1.1 机械挂车：仿真扫空宽度计入 0.5m 安全宽度；轨迹走铰接尾随
