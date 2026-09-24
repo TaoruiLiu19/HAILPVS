@@ -48,12 +48,11 @@ _WIDTH_BANDS = [
     (3.75, 4.50, "D"),
     (4.50, float("inf"), "E"),
 ]
-# 总高度 (m)：规范 3.2.4 中 A/B/C 共区 (4.00,4.50]，D (4.50,5.00]，E >5.00。
-# 区间内的子级（A/B/C）由长/宽维度在 classify() 取最高级时共同决定，
-# 此处高度维度按该区间的最高子级 C 计入（保守），保证 B 级由长度/宽度触发。
+# 总高度 (m)：规范 3.2.4 中 A/B/C 三行高度同区为 (4.00,4.50]，区间内子级由
+# 长/宽维度决定。高度维度只在跨越 4.5 / 5.0 边界时抬到 D/E，不再抢档
+# （修正前把 (4.00,4.50] 固定记 C，导致长宽均 A、总高 4.3 m 的车被误判为 C）。
 _HEIGHT_BANDS = [
-    (float("-inf"), 4.00, "A"),       # ≤4.00 非超限高度，取 A
-    (4.00, 4.50, "C"),                # (4.00,4.50] → A/B/C 共区，保守取 C
+    (float("-inf"), 4.50, "A"),       # ≤4.50 → 高度不抬级，A/B/C 由长宽决定
     (4.50, 5.00, "D"),
     (5.00, float("inf"), "E"),
 ]
@@ -79,12 +78,13 @@ def classify(l: float, b: float, h: float, hydraulic: bool) -> str:
 
 
 def classify_bundle(bundle: InputBundle) -> str:
-    """由输入 Bundle 求尺寸级。总长为车货总体（挂车/货物取大），
-    液压轴线挂车按表3.2.4 液压悬挂挂车长区间分级。
+    """由输入 Bundle 求尺寸级。总长为车货总体（挂车/货物取大）+ 牵引车车身长
+    （表3.2.4 “总长度”为牵引车+半挂车整车总长；trailer.length 为车板长，
+    故补加 bundle.tractor.length）。液压轴线挂车按表3.2.4 液压悬挂挂车长区间分级。
     """
     tl = bundle.trailer
     cargo = bundle.cargo
-    total_l = max(tl.length, cargo.length)
+    total_l = max(tl.length, cargo.length) + bundle.tractor.length
     total_b = max(tl.width, cargo.width)
     total_h = tl.deck_height + cargo.height
     hydraulic = "液压" in tl.trailer_type

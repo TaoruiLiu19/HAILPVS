@@ -14,7 +14,8 @@ import math
 from shapely.geometry import Polygon, MultiPolygon, box
 from shapely.ops import unary_union
 
-from config import (TURN_SAFE_CLEARANCE, LATERAL_CLEARANCE_BY_GRADE,
+from config import (TURN_SAFE_CLEARANCE, TURN_SAFE_CLEARANCE_B12,
+                    LATERAL_CLEARANCE_BY_GRADE,
                     INTERSECTION_RESERVE,
                     HIGHWAY_GRADES, DEFAULT_SUPERELEVATION, PAD_FRICTION, g,
                     VERT_CROSS_STRUCTURE, TUNNEL_CROWN_CLEARANCE,
@@ -112,25 +113,34 @@ def _vehicle_cargo_lines(bundle: InputBundle) -> list[str]:
 
 
 def _hydraulic_b12_lines(bundle, b12) -> list[str]:
-    """液压轴线挂车 B.1.2 闭式解结论文本块（判定口径，D2/D3/D4/D6）。"""
+    """液压轴线挂车 B.1.2 闭式解结论文本块（判定口径，B.1.2-2~6 已按规范原图复核）。"""
     tl = bundle.trailer
     na = max(int(tl.axle_count), 2)
     L = tl.axle_spacing
     lines = [
-        "液压轴线挂车 B.1.2 闭式解（判定口径，第六章定点转向）：",
+        "液压轴线挂车 B.1.2 闭式解（判定口径，第六章定点转向；B.1.2-2~6 已按规范原图复核）：",
         f"θ = min(挂车轴结构最大转角, 工程上限 {AXLE_STEER_ABS_LIMIT_DEG:g}°) "
         f"= {b12['theta_deg']:g}°（D2：θ 不再引用牵引车前轮角；D6：工程上限<90°，不做原地回转）",
         f"首末轴距 d = L<sub>轮挂</sub>·({na}−1) = {L:g} × {na - 1} = {b12['d']:g} m"
         f"（{'规范外推：' + repr(b12['locked']) if not b12['spec_mode'] else '严格守规范，中间锁死不改变 d'}）",
-        f"车板总长 D<sub>总</sub> = 车板长 = {b12['D_total']:g} m（D3 判定口径；牛颈/连接杆耦合段仅绘图、不参与计算）",
-        f"瞬心偏距 base = d/(2·tanθ) = {b12['base']:g} m；"
-        f"R<sub>in</sub> = base + (D<sub>总</sub> − d)/2 = {b12['R_in']:g} m；"
-        f"R<sub>out</sub> = base + (D<sub>总</sub> + d)/2 = {b12['R_out']:g} m",
-        f"扫空宽度 W<sub>swept</sub>（B.1.2-6）= R<sub>out</sub> − R<sub>in</sub> = {b12['W_swept']:g} m；"
-        f"转弯通道宽度 W<sub>turn</sub>（B.1.2-1）= d + 0.5 = {b12['W_turn']:g} m "
-        "（工程锚点，R<sub>外</sub>−R<sub>内</sub>≈d，OCR 残缺待复核）",
-        f"判定口径（车型优先）：扫空 W<sub>swept</sub> ≤ 横向空间宽度 判扫空无障碍；"
-        f"转弯通道 W<sub>turn</sub> ≤ 路面宽度 判转弯通道",
+        f"车板总长 D<sub>总</sub> = 车板长 = {b12['D_total']:g} m（D3 判定口径；牛颈/连接杆耦合段仅绘图、不参与计算）；"
+        f"动力机组长度 C = {b12['power_unit_len']:g} m（B.1.2-5 横项，界面未填时默认 0）",
+        f"瞬心偏距 base = d/(2·tanθ) = {b12['base']:g} m",
+        f"扫空内缘半径 R<sub>min</sub>（B.1.2-4）= base − (D<sub>总</sub>−d)/2 "
+        f"= {b12['base']:g} − ({b12['D_total']:g}−{b12['d']:g})/2 = {b12['R_in']:g} m",
+        f"扫空外缘半径 R<sub>max</sub>（B.1.2-5）= √([base+(D<sub>总</sub>+d)/2]²+[L·N<sub>a</sub>/2+C]²) "
+        f"= {b12['R_out']:g} m（含勾股横项与动力机组长 C，规范下大于旧的线性近似）",
+        f"最大扫空宽度 W<sub>d</sub>（B.1.2-6）= R<sub>max</sub> − R<sub>min</sub> + σ "
+        f"= {b12['R_out']:g} − {b12['R_in']:g} + {TURN_SAFE_CLEARANCE_B12:g} "
+        f"= {b12['W_swept']:g} m（σ={TURN_SAFE_CLEARANCE_B12:g}，安全宽度预留）",
+        f"轮迹半径：R<sub>内</sub> = base = {b12['R_vehicle_in']:g} m（B.1.2-2）；"
+        f"R<sub>外</sub> = √(base² + [L(N<sub>a</sub>−1)/2]²) = {b12['R_vehicle_out']:g} m"
+        "（B.1.2-3，La 规范未定义暂以 0 计入横项，待复核）",
+        f"转弯通道宽度 W<sub>z</sub>（B.1.2-1）= R<sub>外</sub>(轮迹) − R<sub>内</sub>(轮迹) + 0.5 "
+        f"= {b12['R_vehicle_out']:g} − {b12['R_vehicle_in']:g} + 0.5 = {b12['W_turn']:g} m"
+        "（不再复用扫空基数 d）",
+        f"判定口径（车型优先）：扫空 W<sub>d</sub> = {b12['W_swept']:g} m ≤ 横向空间宽度 判扫空无障碍；"
+        f"转弯通道 W<sub>z</sub> = {b12['W_turn']:g} m ≤ 路面宽度 判转弯通道",
     ]
     for w_ in b12["warnings"]:
         lines.append(f"⚠ {w_}")
@@ -154,18 +164,22 @@ def _vertical_check(bundle: InputBundle):
         req = TUNNEL_CROWN_CLEARANCE
         ok = gap >= req - _TOL
         msg = (f"隧道顶部净空：车货总高 {total_h:.3f} m，洞顶净空 {limit:.3f} m，"
-               f"顶部间隙 {gap:.3f} m {'≥' if ok else '&lt;'} 要求 {req:.2f} m。")
-        # 侧壁/检修道/底缘取向净空属于空间结构评价，弯道内核仅校验顶部，
-        # 侧壁 0.5、检修道 0.2、底缘 0.2 在隧道专项模块（P2）中处理。
+               f"顶部间隙 {gap:.3f} m {'≥' if ok else '&lt;'} 要求 {req:.2f} m。"
+               f"侧壁(≥0.50)/检修道(货物底高于检修道≥0.20)/底缘(≥0.20)净空"
+               f"未纳入本系统校核，需专项评估。")
         return ok, total_h, req, msg
 
     if scenario == "ramp":
-        req_min = RAMP_CLEARANCE["minimum"]       # 不应 <0.25
+        # 6.3.2 的“不宜<0.5/不应<0.25”是外廓与护栏等设施之间的**横向预留**
+        # （非顶部竖向间隙），故顶部净空改用结构净空通用阈值(6.4.1/4.4.2)。
+        req_min = VERT_CROSS_STRUCTURE["minimum"]
         ok = gap >= req_min - _TOL
-        disp = ("宜（间隙≥0.50m）" if gap >= RAMP_CLEARANCE["desirable"] - _TOL
-                else "不应通行（间隙&lt;0.25m）")
-        msg = (f"匝道净空(6.3.2)：车货总高 {total_h:.3f} m，净空 {limit:.3f} m，"
-               f"间隙 {gap:.3f} m，判定{disp}；外廓与护栏预留不宜&lt;0.50、不应&lt;0.25。")
+        disp = ("宜（间隙≥0.10m）" if gap >= VERT_CROSS_STRUCTURE["desirable"] - _TOL
+                else "不应通行（间隙&lt;0.05m）")
+        msg = (f"匝道顶部净空(6.3.2)：车货总高 {total_h:.3f} m，净空 {limit:.3f} m，"
+               f"顶部间隙 {gap:.3f} m，顶部按结构净空阈值判定{disp}；"
+               f"匝道外廓与护栏横向预留(不宜&lt;0.50/不应&lt;0.25)未纳入本系统校核，"
+               f"需专项评估。")
         return ok, total_h, req_min, msg
 
     # 跨线构造物 / 上跨桥（6.4.1，4.4.2）：不宜 <0.1，不应 <0.05
@@ -217,7 +231,7 @@ def _lateral_formula_lines(r_min: float, bundle: InputBundle, lat: dict) -> list
     lines = [
         f"最内侧转弯半径 R = {r_min:.3f} m，轮距 b = {b:.2f} m，"
         f"车货重心高 h = {h:.3f} m，超高 i<sub>h</sub> = {ih:.3f}，"
-        f"衬垫摩擦系数 μ = {mu:.2f}",
+        f"横向力系数 μ = 衬垫摩擦系数（保守下限） = {mu:.2f}",
         f"侧滑临界速度 V<sub>ch</sub> = 3.6·√[g·R·(μ+i<sub>h</sub>)/(1−μ·i<sub>h</sub>)] "
         f"= 3.6·√[{g:.2f}·{r_min:.3f}·({mu:.3f}+{ih:.3f})/(1−{mu:.3f}·{ih:.3f})] "
         f"= {vch:.3f} km/h",
@@ -232,7 +246,8 @@ def _lateral_formula_lines(r_min: float, bundle: InputBundle, lat: dict) -> list
         f"停车超高 B.2.3：i<sub>h</sub>({ih:.3f}) "
         f"{'&lt;' if ih < b / (2 * h) else '≥'} b/(2h) = {b / (2 * h):.3f} "
         f"→ {'满足' if lat['parking_ok'] else '不满足'} 停车横向稳定性",
-        f"横向稳定性总体：{'通过' if ok else '不通过'}。",
+        f"横向稳定性总体：{'通过' if ok else '不通过'}",
+        "注：此 μ 为以衬垫摩擦系数替代横向力系数的保守下限（规范 B.2.2 之 μ 为横向力系数）。",
     ]
     return lines
 
@@ -392,6 +407,8 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
 
     # 判定：查表命中即满足；否则回退到附录 B 验算口径（不再无条件覆盖查表）
     if lookup == "pass":
+        # 查表法已按 4.3.1 双条件覆盖，转弯通道宽度视为满足（用于展示口径）
+        width_ok = swept_ok = outer_ok = inner_ok = True
         method = "查表法（表4.3.1）"
         pass_h = True
         verdict = "查表法满足：圆曲线半径与通行空间宽度均大于表4.3.1 数值，空间可通行。"
@@ -426,6 +443,26 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         "turn_channel_w": turn_channel_w,
         "trajectory_source": trajectory_source,
     })
+    # P2-问题7：货物外伸于挂车时增算货物前/后外侧扫空曲线（第六章公式）。
+    # 映射（工程近似）：B=车货总宽、c1=货物横向间隙(同心取0)、L_f/L_a=货前/后外伸、
+    # r_i=车辆扫掠内径(仿真)、c2=内侧安全(≈0.5)。
+    _cargo, _tl = bundle.cargo, bundle.trailer
+    cargo_swept = None
+    if _cargo.width > _tl.width or _cargo.length > _tl.length:
+        _B = max(_tl.width, _cargo.width)
+        _c1 = 0.0
+        _Lf = max(0.0, (_cargo.length - _tl.length) / 2.0)
+        _La = _Lf
+        _c2 = 0.5
+        _rl = max(r_i + _B + _c1, 0.5)
+        cargo_swept = {
+            "active": True, "B": _B, "c1": _c1,
+            "L_f": _Lf, "L_a": _La, "c2": _c2,
+            "R_sf": math.hypot(_rl, _Lf),
+            "R_sa": math.hypot(_rl, _La),
+            "r_s": max(r_i - _c2, 0.3),
+        }
+    res.metrics["cargo_swept"] = cargo_swept
     if b12 is not None:
         res.metrics["B1_2_Rin"] = b12["R_in"]
         res.metrics["B1_2_Rout"] = b12["R_out"]
@@ -438,7 +475,24 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         res.metrics["B1_2_spec_mode"] = b12["spec_mode"]
         res.metrics["B1_2_warnings"] = b12["warnings"]
         res.metrics["B1_2_theta_deg"] = b12["theta_deg"]
+        res.metrics["B1_2_Wd"] = b12["W_swept"]
+        res.metrics["B1_2_R_vehicle_in"] = b12["R_vehicle_in"]
+        res.metrics["B1_2_R_vehicle_out"] = b12["R_vehicle_out"]
+        res.metrics["B1_2_power_unit_len"] = b12["power_unit_len"]
     res.pass_ok = pass_h
+    # —— 转弯通道宽度展示行：液压(B.1.2-1 轮迹)与机械(扫空+0.5)口径不同 ——
+    if b12 is not None:
+        channel_disp = [
+            "转弯通道宽度（判定，B.1.2-1）：见上方液压 B.1.2 闭式解块",
+            f"W<sub>z</sub> = {turn_channel_w:.3f} m ≤ 路面宽度 → "
+            f"{'满足' if width_ok else '不满足'}",
+        ]
+    else:
+        channel_disp = [
+            "转弯通道宽度（判定，含安全宽度）：",
+            f"W<sub>turn</sub> = 判定 W<sub>swept</sub> + {TURN_SAFE_CLEARANCE:g} "
+            f"= {swept_w:.3f} + {TURN_SAFE_CLEARANCE:.3f} = {turn_channel_w:.3f} m",
+        ]
     res.verdict_lines = _vehicle_cargo_lines(bundle) + [
         "【弯道参数】",
         f"弯道类型：圆弧弯道；公路等级：{road.highway_grade}",
@@ -459,9 +513,7 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         f"仿真扫空宽度 W<sub>swept,仿真</sub> = R<sub>o</sub> − R<sub>i</sub> "
         f"= {r_o:.3f} − {r_i:.3f} = {r_o - r_i:.3f} m",
         *(_hydraulic_b12_lines(bundle, b12) if b12 is not None else ()),
-        "转弯通道宽度（判定，含安全宽度）：",
-        f"W<sub>turn</sub> = 判定 W<sub>swept</sub> + {TURN_SAFE_CLEARANCE:g} "
-        f"= {swept_w:.3f} + {TURN_SAFE_CLEARANCE:.3f} = {turn_channel_w:.3f} m",
+        *channel_disp,
         "路面宽度 / 横向空间宽度：",
         f"路面宽度 W<sub>road</sub> = 车道宽 + 硬路肩 = {lane:.3f} + {road.hard_shoulder_w:.3f} "
         f"= {road_w:.3f} m",

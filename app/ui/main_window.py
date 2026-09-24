@@ -79,6 +79,8 @@ _RIGHT_FIELDS = [
     ("入口宽度(m)", "entry_width", True),
     ("出口宽度(m)", "exit_width", True),
     ("弯道内半径(m)", "corner_radius", True),
+    ("左转物理区可通行宽 W_section(m,可留空)", "W_section", False),
+    ("左转处可通行宽 W_lturn(m,可留空)", "W_lturn", False),
     # 交角固定为 90°（直角弯道），不再提供输入
 ]
 
@@ -305,7 +307,7 @@ class MainWindow(QMainWindow):
         self.g_right, f_right = _make_form_group("2. 直角弯道参数")
         self._right_edits = {}
         for name, key, numeric in _RIGHT_FIELDS:
-            ed = _new_edit("0.0")
+            ed = _new_edit("0.0" if numeric else "")
             self._right_edits[key] = ed
             f_right.addRow(_row_label(f"{name}："), ed)
         v.addWidget(self.g_right)
@@ -355,6 +357,14 @@ class MainWindow(QMainWindow):
     def _f_right(self, key):
         return float(self._right_edits[key].text())
 
+    def _f_right_opt(self, key):
+        """可选输入：留空/非数字 → None（回退到入口/出口宽度口径），填数则用于 5.2.1 左转校核。"""
+        txt = self._right_edits.get(key).text().strip()
+        try:
+            return None if txt == "" else float(txt)
+        except ValueError:
+            return None
+
     def collect_bundle(self) -> InputBundle:
         cargo_w = self._f("c_width")
         cargo_l = self._f("c_length")
@@ -403,7 +413,9 @@ class MainWindow(QMainWindow):
                                   entry_width=self._f_right("entry_width"),
                                   exit_width=self._f_right("exit_width"),
                                   corner_radius=self._f_right("corner_radius"),
-                                  intersection_angle_deg=90.0),
+                                  intersection_angle_deg=90.0,
+                                  W_section=self._f_right_opt("W_section"),
+                                  W_lturn=self._f_right_opt("W_lturn")),
                               vertical_clearance=self._f("vertical_clearance"),
                               highway_grade=grade)
         return InputBundle(cargo=cargo, trailer=trailer, tractor=tractor, road=road,

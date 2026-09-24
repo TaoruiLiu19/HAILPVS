@@ -11,7 +11,7 @@ import itertools
 import math
 
 from config import (MIN_TURN_ANGLE_DEG, AXLE_STEER_ABS_LIMIT_DEG,
-                    TURN_SAFE_CLEARANCE_B12)
+                    TURN_SAFE_CLEARANCE_B12, POWER_UNIT_LENGTH)
 from .datamodel import InputBundle
 
 
@@ -214,20 +214,27 @@ def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None):
     """按规范附录 B.1.2 闭式解求液压悬挂挂车的转弯半径、扫空宽度与转弯通道宽度。
 
     中间一轴（或中间两轴）锁死不转向、首尾轴全轮强制转向，各轮绕同一瞬时
-    转动中心做圆周运动：
-      base  = d/(2·tanθ)                           瞬心横向偏距(≈瞬心半径)
-      R_in  = base + (D总−d)/2         式(B.1.2-4)
-      R_out = base + (D总+d)/2         式(B.1.2-5)
-      W_swept = R_out − R_in = d       式(B.1.2-6)  车货总体扫空空间宽度
-      W_turn  = d + 0.5                式(B.1.2-1)  转弯通道宽度(工程锚点)
-    式中 d = L轮挂·(断末有效轴距)，L轮挂 为相邻轴线间距(axle_spacing)；
-    D总 = 车板长(trailer.length, D3)。θ = 第一轴线内侧轮胎转向角(D2)，
-    来源为挂车轴结构最大转向角 axle_max_steering_angle_deg，受工程上限
-    AXLE_STEER_ABS_LIMIT_DEG 钳制(D6)，下端受 MIN_TURN_ANGLE_DEG 防除零。
+    转动中心做圆周运动。公式已按《公路大件运输安全通行评价技术规范》
+    JTG/T 2213—2023 附录 B.1.2 原图（B.1.2-2~6）复核：
+      base  = d/(2·tanθ) = L轮挂·(Na−1)/(2·tanθ)     瞬心横向偏距
+      Rmin  = base − (D总−d)/2                 式(B.1.2-4)
+      Rmax  = √( [base+(D总+d)/2]² + [L·Na/2 + C]² )  式(B.1.2-5, 含动力机组 C)
+      Wd    = Rmax − Rmin + σ                  式(B.1.2-6), σ=安全宽度预留
+      R内(轮迹) = base                          式(B.1.2-2)
+      R外(轮迹) = √( [base+La]² + [L·(Na−1)/2]² )    式(B.1.2-3, La 未定义暂以 0)
+      W_z   = R外(轮迹) − R内(轮迹) + 0.5       式(B.1.2-1)  转弯通道宽度
+    式中 d = L轮挂·(首末有效轴距)，L轮挂 为相邻轴线间距(axle_spacing)；
+    D总 = 车板长(trailer.length, D3，不含牛颈/连接杆耦合段)；
+    C = 动力机组长度(trailer.power_unit_length，缺省 0 → 无 C)；
+    σ = TURN_SAFE_CLEARANCE_B12(=0.5)。
+    θ = 第一轴线内侧轮胎转向角(D2)，来源为挂车轴结构最大转向角
+    axle_max_steering_angle_deg，受工程上限 AXLE_STEER_ABS_LIMIT_DEG 钳制(D6)，
+    下端受 MIN_TURN_ANGLE_DEG 防除零。
 
     D1 locked_axles 双口径：默认严格守规范(中间锁死不改变 d)；仅当锁死轴
     含首/末轴时走规范外推，d=L(last_active−first_active) 并告警。
-    返回字典：R_in/R_out、W_swept、W_turn、base、theta_deg、d、D_total、
+    返回字典：R_in(=Rmin)/R_out(=Rmax)/W_swept(=Wd,含σ)/W_turn、轮迹
+    R_vehicle_in/R_vehicle_out、power_unit_len、base、theta_deg、d、D_total、
     spec_mode、locked、sweep_center_dist(=base,D5 瞬心偏距)、warnings。
     """
     tl = bundle.trailer
@@ -257,11 +264,32 @@ def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None):
     theta_deg = max(MIN_TURN_ANGLE_DEG, min(theta_deg, AXLE_STEER_ABS_LIMIT_DEG))
     theta = math.radians(theta_deg)
 
-    base = d / (2.0 * math.tan(theta))        # = d/(2·tanθ)，瞬心偏距
-    r_in = base + (d_total - d) / 2.0          # B.1.2-4
-    r_out = base + (d_total + d) / 2.0         # B.1.2-5
-    w_swept = r_out - r_in                     # B.1.2-6 = d
-    w_turn = d + TURN_SAFE_CLEARANCE_B12       # B.1.2-1 工程锚点，OCR 待复核
+    # 动力机组长度 C（B.1.2-5 根号内横项 +C），界面未给时回退 config 缺省(默认 0 → 无 C)
+    power_unit_len = float(getattr(tl, "power_unit_length", None)
+                           if getattr(tl, "power_unit_length", None) is not None
+                           else POWER_UNIT_LENGTH)
+
+    base = d / (2.0 * math.tan(theta))        # = L轮挂·(Na−1)/(2·tanθ)，瞬心偏距
+
+    # —— 车货总体最大扫空空间宽度（B.1.2-4/-5/-6，判定“扫空范围内无障碍”）——
+    r_min0 = base - (d_total - d) / 2.0                        # B.1.2-4
+    # 车板过长/轴距过短时 (d_total−d)/2 > base 会使内缘扫空半径取负(退化)。
+    # 负半径非物理(扫空圆越过瞬心)，实测判断失真；取下限并告警，防宽度输入竞态。
+    if r_min0 <= 0.0:
+        r_min = 0.5
+        _rmin_floored = True
+    else:
+        r_min = r_min0
+        _rmin_floored = False
+    r_max = math.hypot(base + (d_total + d) / 2.0,
+                       L * na / 2.0 + power_unit_len)          # B.1.2-5，含横项+C
+    w_swept = r_max - r_min + TURN_SAFE_CLEARANCE_B12          # B.1.2-6，Wd 含 σ
+
+    # —— 转弯通道宽度（轮胎通道，B.1.2-1）：轮迹半径差 + 0.5 ——
+    r_veh_in = base                                             # B.1.2-2
+    la = 0.0   # B.1.2-3 中 La：规范未给出定义(OCR残缺)，暂以 0(仅存横项 L(Na−1)/2)，待复核
+    r_veh_out = math.hypot(base + la, L * (na - 1) / 2.0)       # B.1.2-3
+    w_turn = r_veh_out - r_veh_in + TURN_SAFE_CLEARANCE_B12    # B.1.2-1
 
     warnings_ = []
     if not spec_mode:
@@ -270,10 +298,16 @@ def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None):
     active_count = len([i for i in range(1, na + 1) if i not in locked])
     if active_count < 2:
         warnings_.append("active 转向轴<2,回退规范基准")
+    if _rmin_floored:
+        warnings_.append(
+            f"车板总长 D<sub>总</sub>({d_total:g}m) 相对轴距 span d({d:g}m) 过长,"
+            "扫空内缘半径 B.1.2-4 取负,已取下限 0.5m 参与判定,请核实车板长度输入")
 
     return {
-        "R_in": r_in, "R_out": r_out,
+        "R_in": r_min, "R_out": r_max,
         "W_swept": w_swept, "W_turn": w_turn,
+        "R_vehicle_in": r_veh_in, "R_vehicle_out": r_veh_out,
+        "power_unit_len": power_unit_len,
         "base": base, "theta_deg": round(theta_deg, 4),
         "d": d, "D_total": d_total,
         "spec_mode": spec_mode, "locked": locked,

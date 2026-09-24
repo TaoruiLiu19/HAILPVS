@@ -30,6 +30,7 @@ CENTER_COLOR = "#e02020"      # 关键参考点：红色十字
 TEXT_COLOR = "#0d47a1"        # 标注文字：与标注线同色（深蓝）
 SPINE_COLOR = "#b8c0c8"       # 坐标轴细线：浅灰
 AXLE_COLOR = "#7b3fe4"        # 液压车轴段/转向轮：紫色（区别于机械车黑色轮廓）
+CARGO_SWEPT_COLOR = "#2f9e44"  # 货物扫空曲线（R_sf/R_sa/r_s，货物外伸时）：绿色短划线，区别于车辆扫掠灰线
 
 # 构造弧(扫掠 R_o/R_i)相对道路边界的向内留隙(m)：避免半径弧贴近/压过内缘线
 _SWEPT_ARC_INSET = 0.5
@@ -330,6 +331,25 @@ def draw_sweep_view(res: SweepScenarioResult, out_path, dpi=PLOT_DPI,
         _annotate_radius(ax, center, r_i, turn_deg, r_i_label, "in",
                          color=SWEPT_ARC_COLOR, road=clip_road)
 
+    # —— 货物前/后外侧扫空曲线 + 内侧扫空曲线（第六章公式；仅在货物外伸时绘制）——
+    cargo_swept = res.metrics.get("cargo_swept")
+    if scene == "arc" and isinstance(cargo_swept, dict) and cargo_swept.get("active"):
+        csw_ls = (0, (3, 2))                       # 绿色短划线，区别于车辆扫掠(灰)
+        # 前/后外扫空给不同引出线角度，避免对称外伸时两条同半径弧标注叠在一起
+        out_arcs = (
+            (cargo_swept["R_sf"], 50.0, f"货物前外扫空 R_sf = {cargo_swept['R_sf']:.2f}"),
+            (cargo_swept["R_sa"], 30.0, f"货物后外扫空 R_sa = {cargo_swept['R_sa']:.2f}"),
+        )
+        for radius, l_ang, label_ in out_arcs:
+            if radius > 0.5 and radius >= r_o - 1e-9:
+                _annotate_radius(ax, center, radius, turn_deg, label_, "out",
+                                 color=CARGO_SWEPT_COLOR, ls=csw_ls, label_ang=l_ang)
+        r_s = cargo_swept["r_s"]
+        if r_s > 0.3 and r_s < r_i + 1e-9:
+            _annotate_radius(ax, center, r_s, turn_deg,
+                             f"货物内扫空 r_s = {r_s:.2f}", "in",
+                             color=CARGO_SWEPT_COLOR, ls=csw_ls, label_ang=40.0)
+
     # —— 圆弧弯道：补画“弯道部分”道路曲线内/外缘半径（区别于整车扫掠半径）——
     if scene == "arc":
         road_outer = float(metrics.get("road_outer", 0.0) or 0.0)
@@ -417,6 +437,8 @@ def draw_sweep_view(res: SweepScenarioResult, out_path, dpi=PLOT_DPI,
         Line2D([0], [0], color=SWEPT_COLOR, lw=1.0, ls=(0, (5, 3)),
                label="扫掠包络 - 整车全程占道范围"),
         Line2D([0], [0], color=SWEPT_ARC_COLOR, lw=1.0, label="扫掠曲线（R_o / R_i）"),
+        Line2D([0], [0], color=CARGO_SWEPT_COLOR, lw=1.0, ls=(0, (3, 2)),
+               label="货物扫空曲线（R_sf / R_sa / r_s，货物外伸时）"),
         Line2D([0], [0], color=VEHICLE_COLOR, lw=1.1, label="车辆轮廓（挂车 / 牵引车）"),
         Line2D([0], [0], color=CARGO_COLOR, lw=1.2, label="货物轮廓"),
         Line2D([0], [0], color=AXLE_COLOR, lw=1.1, ls="-",

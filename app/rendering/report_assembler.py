@@ -138,6 +138,12 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
         rows.append(("车辆扫掠内径 R_i (m)", f"{m.get('R_i',0):.3f}"))
         rows.append(("扫空空间宽度 (m)", f"{m.get('W_needed',0):.3f}"))
         rows.append(("转弯通道宽度(含0.5m安全宽度) W (m)", f"{m.get('W',0):.3f}"))
+        rows.append(("转弯通道车辆占用宽度 vehicle_channel_w (m)",
+                     f"{m.get('turn_channel_w',0):.3f}"))
+        rows.append(("转弯通道宽度口径",
+                     "液压：B.1.2-1 轮迹 R外−R内+σ；机械：扫空宽度+σ"
+                     if m.get('trajectory_source') == "B.1.2"
+                     else "机械挂车：仿真扫空宽度 + 0.5m 安全宽度"))
         rows.append(("路面宽度 (m)", f"{m.get('road_width',0):.3f}"))
         rows.append(("横向空间宽度 (m)", f"{m.get('transverse_space_w',0):.3f}"))
         rows.append(("外缘净空 (m)", f"{m.get('clearance_outer',0):.3f}"))
@@ -145,8 +151,10 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
         if "B1_2_Rin" in m:
             rows.append(("液压挂车最内转弯半径 B.1.2 (m)", f"{m.get('B1_2_Rin',0):.3f}"))
             rows.append(("液压挂车最外转弯半径 B.1.2 (m)", f"{m.get('B1_2_Rout',0):.3f}"))
-            rows.append(("液压挂车扫空宽度 W_swept B.1.2 (m)", f"{m.get('B1_2_W',0):.3f}"))
-            rows.append(("液压挂车转弯通道宽度 W_turn B.1.2 (m)", f"{m.get('B1_2_W_turn',0):.3f}"))
+            rows.append(("液压挂车扫空宽度 Wd=Rmax−Rmin+σ (m)", f"{m.get('B1_2_Wd', m.get('B1_2_W',0)):.3f}"))
+            rows.append(("液压挂车转弯通道宽度 W_z=R外(轮迹)−R内(轮迹)+σ (m)",
+                         f"{m.get('B1_2_W_turn',0):.3f}"))
+            rows.append(("液压动力机组长度 C (m)", f"{m.get('B1_2_power_unit_len',0):.3f}"))
             rows.append(("液压 θ(首轴最大转向角) B.1.2 (°)", f"{m.get('B1_2_theta_deg',0):.3f}"))
             rows.append(("液压车板总长 D_总 (m)", f"{m.get('B1_2_D_total',0):.3f}"))
             rows.append(("B.1.2 口径",

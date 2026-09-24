@@ -48,6 +48,9 @@ class TrailerParams(BaseModel):
     coupling_length: float = Field(
         0.0, ge=0,
         description="连接部分长度(m):挂车车板前边沿→牵引车后边沿距离;仅绘图,不参与计算(D8)")
+    power_unit_length: float = Field(
+        0.0, ge=0,
+        description="动力机组长度 C(m),B.1.2-5 横项 +C;界面未给时默认 0(退化为无 C)")
 
 
 class TractorParams(BaseModel):
