@@ -397,7 +397,8 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
         _annotate_radius(ax, center, r_i, turn_deg, r_i_label, "in",
                          color=SWEPT_ARC_COLOR, road=clip_road)
 
-    # —— 货物前/后外侧扫空曲线 + 内侧扫空曲线（第六章公式；仅在货物外伸时绘制）——
+    # —— 货物前/后外侧扫空曲线（第六章公式；仅在货物外伸时绘制）——
+    #    不再标注"货物内扫空 r_s"（用户要求：图面只保留前后外扫空曲线）
     cargo_swept = res.metrics.get("cargo_swept")
     if scene == "arc" and isinstance(cargo_swept, dict) and cargo_swept.get("active"):
         csw_ls = (0, (3, 2))                       # 绿色短划线，区别于车辆扫掠(灰)
@@ -410,11 +411,6 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
             if radius > 0.5 and radius >= r_o - 1e-9:
                 _annotate_radius(ax, center, radius, turn_deg, label_, "out",
                                  color=CARGO_SWEPT_COLOR, ls=csw_ls, label_ang=l_ang)
-        r_s = cargo_swept["r_s"]
-        if r_s > 0.3 and r_s < r_i + 1e-9:
-            _annotate_radius(ax, center, r_s, turn_deg,
-                             f"货物内扫空 r_s = {r_s:.2f}", "in",
-                             color=CARGO_SWEPT_COLOR, ls=csw_ls, label_ang=40.0)
 
     # —— 圆弧弯道：补画“弯道部分”道路曲线内/外缘半径（区别于整车扫掠半径）——
     if scene == "arc":
@@ -432,24 +428,18 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
                              f"道路曲线内缘 = {road_inner:.2f}", "in",
                              ls=(0, (6, 2)), label_ang=38.0)
 
-    # —— 转弯通道宽度标注（扫掠宽度 W）——
+    # —— 扫掠环带宽度标注 ——
     mid_ang = turn_deg * 0.5
+    band_w = max(r_o - r_i, 0.0)
     if scene == "arc":
-        swept_w = float(metrics.get("W_swept", 0.0) or 0.0)
-        band_w = max(r_o - r_i, 0.0)
         if r_i > 0.5 and r_o > 0.5 and band_w > 0:
-            # 环带标注须与**所画环带**一致，取几何带宽 R_o−R_i；液压轴线挂车的判定
-            # 量是 B.1.2-6 特征宽度 W_d，其值与几何带宽不同（B.1.2-5 的 R_max 偏大），
-            # 故另附注，避免"标注值 ≠ 图中环带宽度"的误读。
-            band_label = f"扫掠环带 R_o−R_i = {band_w:.2f}"
-            if abs(swept_w - band_w) > 0.02:
-                band_label += f"（判定用 W_d = {swept_w:.2f}）"
-            _annotate_band(ax, center, r_i, r_o, mid_ang, band_label)
-    else:  # right_angle
-        w = float(metrics.get("W", 0.0) or 0.0)
-        if r_i > 0.5 and r_o > 0.5 and w > 0:
+            # 标注即所画环带的几何宽度 R_o−R_i（不加括注）
             _annotate_band(ax, center, r_i, r_o, mid_ang,
-                           f"扫掠宽度 W = {w:.2f}")
+                           f"扫掠环带 R_o−R_i = {band_w:.2f}")
+    else:  # right_angle
+        if r_i > 0.5 and r_o > 0.5 and band_w > 0:
+            _annotate_band(ax, center, r_i, r_o, mid_ang,
+                           f"扫掠宽度 W = {band_w:.2f}")
 
         # —— 直角弯：交角 + 弯道（内角导圆）半径 标注 ——
         r_path = float(metrics.get("r_path", 0.0) or 0.0)
@@ -472,8 +462,12 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
                 a = math.radians(45.0)
                 ex = cxx + cr * math.cos(a)
                 ey = cyy + cr * math.sin(a)
-                lx = cxx + (cr + 2.4) * math.cos(a)
-                ly = cyy + (cr + 2.4) * math.sin(a)
+                # 标注放在**路面之外**：内角导圆的圆心位于 L 形被切掉的内角空腔里，
+                # 故把文字沿 45° 收到弧线内侧（空腔内）再引出，避免像原先取
+                # cr+2.4 那样正好落在内角顶点、压住路面转角。半径过小时保底留出余量。
+                lab_r = max(cr - 2.6, 0.35 * cr, 0.4)
+                lx = cxx + lab_r * math.cos(a)
+                ly = cyy + lab_r * math.sin(a)
                 ax.plot([lx, ex], [ly, ey], color=DIM_COLOR, linewidth=0.7, zorder=3)
                 ax.text(lx, ly, f"内角半径 = {cr:.2f}", color=TEXT_COLOR, fontsize=9,
                         ha="center", va="center", family="Microsoft YaHei",
@@ -489,36 +483,16 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
     from matplotlib.lines import Line2D
     verdict = "通过" if pass_ok else "不通过"
     vc = "#2f855a" if pass_ok else "#c53030"
-    sigma = float(metrics.get("sigma", 0.0) or 0.0)
     info_lines = [f"检验结论：{verdict}"]
     if scene == "arc":
-        # 每个"所需宽度"必须与其对应的"可供宽度"配对，不能混用（旧版把扫空空间
-        # 宽度 W_d 与**车道宽度**相比，导致通过工况显示成"12.57 / 7.00"而看起来超限）：
-        #   转弯通道宽度 ≤ 路面宽度(行车道+硬路肩) ／ 扫空空间宽度 ≤ 横向空间宽度
-        # 查表法命中时两项宽度判据由 4.3.1-1 覆盖，此时不再逐条列出，只列真正生效的
-        # 4.2.1 内/外缘预留。
-        lookup = metrics.get("lookup")
-        w_turn = float(metrics.get("turn_channel_w")
-                       or metrics.get("W", 0.0) or 0.0)
+        # 只做"所需宽度 / 道路宽度"的直接对比（不提查表法/其它判据）。
+        # 所需宽度取图中所画扫掠环带的几何宽度 R_o−R_i；道路宽度取路面宽度
+        # （行车道+硬路肩）。内/外缘预留 σ 已由图中道路内/外缘与 R_o/R_i 的
+        # 半径标注直接读出，不再重复列出。
         road_w = float(metrics.get("road_width", 0.0) or 0.0)
-        w_swept = float(metrics.get("W_swept", 0.0) or 0.0)
-        trans_w = float(metrics.get("transverse_space_w", 0.0) or 0.0)
-        if lookup == "pass":
-            info_lines.append("4.3.1-1 查表法：两项宽度判据满足")
-        else:
-            info_lines.append(
-                f"转弯通道 {w_turn:.2f} "
-                f"{'≤' if w_turn <= road_w + 1e-6 else '>'} 路面 {road_w:.2f}")
-            info_lines.append(
-                f"扫空 {w_swept:.2f} "
-                f"{'≤' if w_swept <= trans_w + 1e-6 else '>'} 横向空间 {trans_w:.2f}")
-        clr_o = metrics.get("clearance_outer")
-        clr_i = metrics.get("clearance_inner")
-        if clr_o is not None and clr_i is not None:
-            clr_ok = min(float(clr_i), float(clr_o)) >= sigma - 1e-6
-            info_lines.append(
-                f"4.2.1 内/外缘净空 {float(clr_i):.2f} / {float(clr_o):.2f} "
-                f"{'≥' if clr_ok else '<'} σ {sigma:.2f}")
+        info_lines.append(
+            f"所需宽度 {band_w:.2f} "
+            f"{'≤' if band_w <= road_w + 1e-6 else '>'} 道路宽度 {road_w:.2f}")
     elif "entry_width" in metrics:
         d_w2 = float(metrics.get("tractor_swing_widening", 0.0) or 0.0)
         info_lines.append(
@@ -549,7 +523,7 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
     if scene == "arc" and isinstance(_cs, dict) and _cs.get("active"):
         handles.append(Line2D([0], [0], color=CARGO_SWEPT_COLOR, lw=1.0,
                               ls=(0, (3, 2)),
-                              label="货物扫空曲线（R_sf / R_sa / r_s）"))
+                              label="货物扫空曲线（R_sf / R_sa）"))
     handles += [
         Line2D([0], [0], color=VEHICLE_COLOR, lw=1.1, label="车辆轮廓（挂车 / 牵引车）"),
         Line2D([0], [0], color=CARGO_COLOR, lw=1.2, label="货物轮廓"),
