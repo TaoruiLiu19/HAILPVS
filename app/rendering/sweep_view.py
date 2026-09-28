@@ -104,6 +104,47 @@ def _crosshair(ax, x, y, arm=1.8):
     ax.plot([x, x], [y - arm, y + arm], color=CENTER_COLOR, linewidth=1.2, zorder=5)
 
 
+def _locked_axle_axis_line(ax, frame, center, tol=0.15, color=AXLE_COLOR):
+    """液压车：画**锁死轴（δ=0）**的轴线延长线，指向瞬时转向中心。
+
+    依据规范 B.1.2 条文说明：「轮胎随圆弧切线方向转向，转向角度第一轴线和最后一
+    轴线为最大，依次到中间**不转向的一轴线**或中间转向的两轴线（锁死轴）」——
+    不转向轴的轴线（垂直于轮胎滚动方向的旋转轴线）延长后即为过瞬心的那条线。
+
+    只画这一根：首/末轴是转向轴，其"轮轴方向"是转向后的方向，画成"轴线延长线"
+    易被误读；且当前绘图轴位（车板前/中/后内收 1m）与转角 δ（按轴组跨度算）不同源，
+    首/末轴延长线会偏离圆心约 2.7 m，只有锁死轴精确过圆心。
+
+    仅当该轴线确实通过转弯圆心（垂距 ≤ tol）时才绘制——稳态圆弧段成立；
+    入/出弯直道瞬心在无穷远，自动不画。机械车（铰接尾随，B.1.1）无此构造。
+    返回是否已绘制。
+    """
+    if not frame or len(frame) <= 5 or not frame[5]:
+        return False
+    info = frame[5]
+    psi = float(info.get("psi", 0.0))
+    locked = [a for a in info.get("axles", []) if abs(float(a[3])) < 1e-9]
+    if not locked:
+        return False
+    mx, my = float(locked[0][1]), float(locked[0][2])
+    nx, ny = -math.sin(psi), math.cos(psi)          # 车板横向＝不转向轴的轴线方向
+    cx, cy = center
+    # 圆心在轴线上的投影参数：n̂ 无论朝向圆心与否都成立
+    t_star = (cx - mx) * nx + (cy - my) * ny
+    if math.hypot(mx + t_star * nx - cx, my + t_star * ny - cy) > tol:
+        return False                                 # 瞬心不在此轴线上（直道/口径不符）
+    half_track = float(locked[0][4])
+    t0, t1 = -(half_track + 2.0), t_star + 3.5       # 外端让开板车半宽；内端穿过圆心
+    if t0 > t1:
+        t0, t1 = t1, t0
+    ax.plot([mx + t0 * nx, mx + t1 * nx], [my + t0 * ny, my + t1 * ny],
+            color=color, linewidth=0.8, linestyle=(0, (7, 3)), zorder=3)
+    ax.text(mx + t1 * nx, my + t1 * ny, "锁死轴轴线延长线", color=color,
+            fontsize=8.5, ha="center", va="center", family="Microsoft YaHei",
+            bbox=dict(facecolor="white", edgecolor="none", pad=1.2), zorder=4)
+    return True
+
+
 def _rotated_rect(cx, cy, ang, half_len, half_wid):
     """以 (cx,cy) 为中心、航向 ang(弧度)、长 2·half_len、宽 2·half_wid 的矩形四角。
 
@@ -428,6 +469,14 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
                              f"道路曲线内缘 = {road_inner:.2f}", "in",
                              ls=(0, (6, 2)), label_ang=38.0)
 
+    # —— 液压车：锁死轴轴线延长线（指向转弯圆心）——
+    #    仅液压车有轴层（帧携带 axle_geoms）；机械车（铰接尾随）不画，绘图口径不变。
+    #    只画一根，且仅在该轴线确实过圆心时绘制（弧上成立、直道自动跳过）。
+    if any(len(f) > 5 and f[5] for f in res.vehicle_frames):
+        for _f in res.vehicle_frames:
+            if _locked_axle_axis_line(ax, _f, center):
+                break
+
     # —— 扫掠环带宽度标注 ——
     mid_ang = turn_deg * 0.5
     band_w = max(r_o - r_i, 0.0)
@@ -531,6 +580,8 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
     if any(len(f) > 5 and f[5] for f in res.vehicle_frames):
         handles.append(Line2D([0], [0], color=AXLE_COLOR, lw=1.1,
                               label="液压车轴线/转向轮（δ 朝瞬心）"))
+        handles.append(Line2D([0], [0], color=AXLE_COLOR, lw=0.9, ls=(0, (7, 3)),
+                              label="锁死轴轴线延长线（指向转弯圆心）"))
     if scene == "arc":
         handles.append(Line2D([0], [0], color=DIM_COLOR, lw=0.9,
                               label="道路曲线内 / 外缘半径"))

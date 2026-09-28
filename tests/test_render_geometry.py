@@ -227,3 +227,55 @@ def test_no_missing_glyph_warnings(factory, tmp_path):
         draw_sweep_view(res, str(tmp_path / "sweep.png"))
     bad = [str(w.message) for w in caught if "missing from font" in str(w.message)]
     assert not bad, f"图内出现缺字形字符：{bad}"
+
+
+# ---- 液压车锁死轴轴线延长线（指向转弯圆心；机械车不画）----
+def _dashed_axle_lines(ax):
+    from app.rendering.sweep_view import AXLE_COLOR
+    return [ln for ln in ax.lines
+            if str(ln.get_color()).lower() == AXLE_COLOR
+            and ln.get_linestyle() not in ("-", "solid")]
+
+
+def _point_line_dist(pt, ln):
+    xs, ys = list(ln.get_xdata()), list(ln.get_ydata())
+    x1, y1, x2, y2 = xs[0], ys[0], xs[-1], ys[-1]
+    dx, dy = x2 - x1, y2 - y1
+    return abs(dy * pt[0] - dx * pt[1] + x2 * y1 - y2 * x1) / math.hypot(dx, dy)
+
+
+@pytest.mark.parametrize("factory", [_hydraulic_arc_bundle, _right_angle_bundle])
+def test_locked_axle_extension_passes_turn_center(factory):
+    # 规范 B.1.2："依次到中间不转向的一轴线（锁死轴）"——其轴线延长线即指向瞬心。
+    # 液压车须恰好画一根，且该线通过转弯圆心。
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from app.rendering.sweep_view import build_figure
+
+    res = run_scene(factory())
+    assert any(len(f) > 5 and f[5] for f in res.vehicle_frames)   # 有轴层＝液压车
+    fig, ax = build_figure(res)
+    try:
+        lines = _dashed_axle_lines(ax)
+        assert len(lines) == 1, f"应只画锁死轴一根，实际 {len(lines)} 根"
+        center = tuple(res.metrics["turn_center"])
+        assert _point_line_dist(center, lines[0]) < 0.05, "延长线未通过转弯圆心"
+        assert any("锁死轴轴线延长线" in t.get_text() for t in ax.texts)
+    finally:
+        matplotlib.pyplot.close(fig)
+
+
+def test_mechanical_drawing_unchanged_no_axle_extension():
+    # 机械车（铰接尾随，B.1.1）绘图口径不变：无轴层、无锁死轴延长线
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from app.rendering.sweep_view import build_figure
+
+    res = run_scene(_failing_lookup_bundle())
+    assert not any(len(f) > 5 and f[5] for f in res.vehicle_frames)
+    fig, ax = build_figure(res)
+    try:
+        assert _dashed_axle_lines(ax) == []
+        assert not any("锁死轴" in t.get_text() for t in ax.texts)
+    finally:
+        matplotlib.pyplot.close(fig)
