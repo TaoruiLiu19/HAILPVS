@@ -12,6 +12,8 @@ COLOR_RED = "#c53030"        # 不通过 / 不满足 / 不合格
 
 # “不通过/不满足/不合格”在前，避免被“通过/满足/合格”拆成两半
 _VERDICT_RE = re.compile(r"不通过|不满足|不合格|通过|满足|合格")
+# 同一表达式带捕获组，用于把整行切成 片段/判定词 交替序列（逐词着色）
+_VERDICT_SPLIT_RE = re.compile(r"(不通过|不满足|不合格|通过|满足|合格)")
 
 
 def _is_fail(word: str) -> bool:
@@ -19,10 +21,32 @@ def _is_fail(word: str) -> bool:
 
 
 def verdict_color(text: str):
-    """返回 text 中出现的判定词颜色：'red' / 'green' / None。"""
-    for m in _VERDICT_RE.finditer(text):
-        return COLOR_RED if _is_fail(m.group(0)) else COLOR_GREEN
-    return None
+    """返回 text 的整体判定颜色：COLOR_RED / COLOR_GREEN / None。
+
+    **同一文本内判定词极性冲突时返回 None**——整段着色的渲染器无法同时表达
+    "满足"与"不通过"两种极性，此前按"首个判定词"上色会把
+    「查表法满足…→ 不通过。」整行染成绿色。需要逐词着色请用
+    `split_verdict_segments`。
+    """
+    polars = {w.startswith("不") for w in _VERDICT_RE.findall(text)}
+    if len(polars) != 1:
+        return None
+    return COLOR_RED if polars.pop() else COLOR_GREEN
+
+
+def split_verdict_segments(text: str):
+    """把 text 切成 [(片段, 颜色或 None), ...]，供 Word 等逐词着色的渲染器使用。
+
+    判定词片段给出红/绿，其余片段为 None（沿用默认字色）。
+    """
+    out = []
+    for seg in _VERDICT_SPLIT_RE.split(text):
+        if not seg:
+            continue
+        is_word = _VERDICT_SPLIT_RE.fullmatch(seg) is not None
+        out.append((seg, (COLOR_RED if _is_fail(seg) else COLOR_GREEN)
+                    if is_word else None))
+    return out
 
 
 def colorize_verdict_html(text: str) -> str:

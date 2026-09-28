@@ -7,11 +7,11 @@
 import os
 import datetime
 
-from PyQt5.QtWidgets import (QMainWindow, QLabel, QLineEdit, QPushButton, QGroupBox,
-                             QFormLayout, QVBoxLayout, QHBoxLayout, QTabWidget,
+from PyQt5.QtWidgets import (QMainWindow, QLabel, QPushButton, QFileDialog,
+                             QVBoxLayout, QHBoxLayout, QTabWidget,
                              QScrollArea, QFrame, QSplitter, QTextBrowser, QWidget,
-                             QMessageBox, QApplication)
-from PyQt5.QtCore import Qt, QTimer
+                             QMessageBox)
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
 
 from config import (APP_NAME, APP_VERSION, ROAD_TYPES, TRAILER_TYPES,
@@ -571,15 +571,26 @@ class MainWindow(QMainWindow):
     def action_show_acceptance(self):
         QMessageBox.information(self, "检验方法依据", ACCEPTANCE_NOTE)
 
-    # ================= Word 导出（M5 由 report_assembler 接入）=================
+    # ================= Word 导出（口令保护：EXPORT_PWD）=================
     def export_word(self):
         if self.cur_result is None:
             QMessageBox.information(self, "提示", "请先运行弯道检验，再生成报告。")
             return
         try:
             from app.rendering.report_assembler import assemble_and_save
-        except Exception:
-            QMessageBox.information(self, "提示", "报告模块尚未完成，敬请期待。")
+        except ImportError as e:
+            QMessageBox.warning(self, "报告模块不可用",
+                                f"报告依赖加载失败：{e}\n"
+                                "请确认已安装 python-docx / matplotlib。")
+            return
+        # 导出口令保护（口令见 config.EXPORT_PWD）
+        from PyQt5.QtWidgets import QInputDialog, QLineEdit
+        pwd, ok = QInputDialog.getText(self, "导出口令", "请输入导出口令：",
+                                       QLineEdit.Password)
+        if not ok:
+            return
+        if pwd != EXPORT_PWD:
+            QMessageBox.warning(self, "口令错误", "导出口令不正确，已取消导出。")
             return
         # 把当前表单输入挂到结果上，供报告“弯道输入参数”表读取
         self.cur_result.user_meta = self.pack_model_data()
@@ -595,5 +606,4 @@ class MainWindow(QMainWindow):
 
 
 # 延迟导入，避免 import 循环
-from PyQt5.QtWidgets import QFileDialog
 from app.ui.widgets import ImageViewerDialog

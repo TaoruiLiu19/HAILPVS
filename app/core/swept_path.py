@@ -5,7 +5,6 @@
 from __future__ import annotations
 import math
 
-from shapely.geometry import Polygon, MultiPolygon
 from shapely.ops import unary_union
 
 
@@ -43,7 +42,6 @@ def measure_steady_turn(kin, turn_steps, v=1.5, dt=0.05, center=(0, 0)):
     from itertools import repeat
 
     delta = kin.delta if kin.delta else kin.max_delta * 0.7
-    r_path = kin.wheelbase / math.tan(delta)
     cx, cy = center
     kin.v = v
     rmax, rmin = 0.0, 1e18

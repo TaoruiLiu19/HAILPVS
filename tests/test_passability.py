@@ -16,12 +16,11 @@ from app.core.datamodel import (InputBundle, CargoParams, TrailerParams,
                                 TractorParams, RoadParams, ArcCorner,
                                 RightAngleCorner)
 from app.core.passability import run_scene
-from app.core.grade import (classify, classify_bundle, TABLE_4_3_1,
-                            arch_lookup_apply)
+from app.core.grade import (classify, TABLE_4_3_1, arch_lookup_apply)
 from app.core.kinematics import (hydraulic_turn_radii,
-                                 hydraulic_coupling_draw_anchor,
                                  axle_steering_geoms,
-                                 hydraulic_arc_trajectory)
+                                 hydraulic_arc_trajectory,
+                                 hydraulic_rigid_sweep_radii)
 from app.core.lateral import (side_slip_critical_v, overturn_critical_v,
                               parking_superelevation_ok)
 from config import (AXLE_STEER_ABS_LIMIT_DEG, MIN_TURN_ANGLE_DEG,
@@ -80,14 +79,19 @@ def _h_bundle(trailer, outer=30.0, lane=7.0):
 # ---- M1: 0.5m 安全宽度 ----
 def test_m1_safety_clearance_flips_judgement():
     # 液压挂车 B.1.2：扫空宽度 Wd = Rmax−Rmin+σ（B.1.2-6，含安全宽度 σ=0.5）。
-    # 修复前旧式线性近似 W_swept=d、W_turn=d+0.5；规范闭式解下 Wd 增大且含 σ，
+    # θ 按实际弯道半径反算(D9)：tanθ=d/(2R_veh) → base ≡ R_veh = 27.4 m，
+    # 故 R_min = 27.4−(D总−d)/2 = 26.4（正，不再触发下限钳制）；
+    # R_max = √((R_veh+(D总+d)/2)² + (L·Na/2+C)²) = √(38.4²+7.5²) = 39.126。
     # 窄车道时 Wd 超过横向空间宽度 → 判定不通过（低于宽车道场景）。
     b = _arc_bundle(lowbed=False, outer=30.0, lane=5.2,
                     lateral_clearance=0.0, axle_spacing=5.0)
     res = run_scene(b)
     m = res.metrics
     assert m["B1_2_Wd"] == pytest.approx(m["W_needed"])               # 扫空宽度 = 判定 Wd
-    assert m["W_needed"] == pytest.approx(14.171, abs=2e-3)           # = Rmax−Rmin+σ
+    assert m["B1_2_base"] == pytest.approx(27.4, abs=1e-9)            # D9: base ≡ 实际半径
+    assert m["B1_2_Rin"] == pytest.approx(26.4, abs=1e-9)             # 恒为正
+    assert m["B1_2_warnings"] == []                                  # 无 R_min 取负告警
+    assert m["W_needed"] == pytest.approx(13.2256, abs=2e-3)         # = Rmax−Rmin+σ
     assert m["W_needed"] > m["transverse_space_w"]                    # 扫空 > 横向空间 → 不通过
     assert res.pass_ok is False
 
@@ -97,6 +101,85 @@ def test_m1_same_vehicle_passes_with_wider_lane():
                     lateral_clearance=0.0, axle_spacing=5.0)
     res = run_scene(b)
     assert res.pass_ok is True
+
+
+# ---- D9/D10: θ 口径 / La / 仅板车刚体扫空（液压车口径整治）----
+def test_b12_theta_from_actual_turn_radius():
+    # D9: 给定实际弯道半径 → θ = atan(d/(2R))，瞬心偏距 base ≡ R
+    tl = _h_trailer(axle_count=4, axle_spacing=1.5)          # d = 4.5
+    r = hydraulic_turn_radii(_h_bundle(tl), actual_turn_radius=26.5)
+    assert r["theta_source"] == "turn_radius"
+    # 返回字典中 theta_deg 按 4 位小数取整，故此处容差取 1e-4
+    assert r["theta_deg"] == pytest.approx(
+        math.degrees(math.atan(4.5 / (2 * 26.5))), abs=1e-4)
+    assert r["base"] == pytest.approx(26.5, abs=1e-9)        # base ≡ 实际走行半径
+    assert r["turn_radius"] == pytest.approx(26.5)
+    # 长车板(12m)相对轴组(4.5m)不再给出负内缘半径，也不再触发下限告警
+    assert r["R_in"] > 0
+    assert r["warnings"] == []
+
+
+def test_b12_theta_falls_back_to_axle_max_without_radius():
+    # 未给半径 → 回退结构最大转角（固有最不利口径），保持直接调用向后兼容
+    tl = _h_trailer(axle_max_steering_angle_deg=25.0)
+    r = hydraulic_turn_radii(_h_bundle(tl))
+    assert r["theta_source"] == "axle_max"
+    assert r["theta_deg"] == pytest.approx(25.0, abs=1e-9)
+
+
+def test_b12_theta_clamped_to_axle_max():
+    # 半径小到所需转角超过结构最大转角 → θ 钳到 θ_max，base 大于该半径
+    tl = _h_trailer(axle_count=4, axle_spacing=1.5,
+                    axle_max_steering_angle_deg=3.0)          # d = 4.5
+    r = hydraulic_turn_radii(_h_bundle(tl), actual_turn_radius=26.5)
+    assert r["theta_deg"] == pytest.approx(3.0, abs=1e-9)
+    assert r["base"] > 26.5
+
+
+def test_b12_la_is_track_width():
+    # D10: B.1.2-3 的 La 取轮距（与第六章自走式挂车最小转弯半径式吻合），
+    # 不再暂取 0——否则 R外(轮迹) 与转弯通道宽度 W_z 被低估（偏不安全）
+    tl = _h_trailer(axle_count=4, axle_spacing=1.5, track_width=2.9)
+    b = _h_bundle(tl)
+    r = hydraulic_turn_radii(b, actual_turn_radius=26.5)
+    assert r["La"] == pytest.approx(2.9)
+    d_half = 1.5 * (4 - 1) / 2.0                             # l = d/2
+    assert r["R_vehicle_out"] == pytest.approx(
+        math.hypot(r["base"] + 2.9, d_half))
+    assert r["W_turn"] == pytest.approx(
+        r["R_vehicle_out"] - r["R_vehicle_in"] + TURN_SAFE_CLEARANCE_B12)
+    # 第六章 R_min = √((l/tanα_max + b)² + l²) + (B−b)/2 与 La=轮距时逐项一致
+    # （用精确 θ 而非返回字典中 4 位取整的 theta_deg）
+    theta_full = math.atan(1.5 * (4 - 1) / (2 * 26.5))
+    r6 = math.hypot(d_half / math.tan(theta_full) + 2.9, d_half) \
+        + (tl.width - tl.track_width) / 2.0
+    assert r["R_vehicle_out"] == pytest.approx(
+        r6 - (tl.width - tl.track_width) / 2.0, abs=1e-9)
+
+
+def test_hydraulic_rigid_sweep_radii_excludes_tractor():
+    # 仅板车+货物刚体扫空：R_o=√((R+w/2)²+(L/2)²)、R_i=R−w/2，与牵引车无关
+    b = _h_bundle(_h_trailer(axle_count=4, axle_spacing=1.5))
+    r_o, r_i = hydraulic_rigid_sweep_radii(b, 26.5)
+    assert r_o == pytest.approx(math.hypot(26.5 + 1.5, 6.0))   # 包络 12 m × 3.0 m
+    assert r_i == pytest.approx(26.5 - 1.5)
+    # 换更大牵引车不改变板车扫空半径（B.1.2 条文说明：牵引车基本不增加转弯半径）
+    b2 = _h_bundle(_h_trailer(axle_count=4, axle_spacing=1.5))
+    b2.tractor.width, b2.tractor.length = 3.5, 12.0
+    assert hydraulic_rigid_sweep_radii(b2, 26.5) == (r_o, r_i)
+
+
+def test_hydraulic_arc_clearance_uses_trailer_only():
+    # 圆弧弯道液压车的 R_o/R_i 取板车刚体几何（不含车头），内/外缘预留转正
+    b = _h_bundle(_h_trailer(axle_count=4, axle_spacing=1.5),
+                  outer=30.0, lane=7.0)
+    res = run_scene(b)
+    m = res.metrics
+    r_o, r_i = hydraulic_rigid_sweep_radii(b, m["trailer_turn_radius"])
+    assert m["R_o"] == pytest.approx(r_o, abs=1e-9)
+    assert m["R_i"] == pytest.approx(r_i, abs=1e-9)
+    assert m["clearance_outer"] > 0 and m["clearance_inner"] > 0
+    assert "板车刚体扫空量测" in "\n".join(res.verdict_lines)
 
 
 # ---- M2/M3: 内缘约束与横向预留 ----
@@ -124,6 +207,40 @@ def test_m3_explicit_sigma_overrides_grade():
                     lateral_clearance=0.1)
     res = run_scene(b)
     assert res.metrics["sigma"] == pytest.approx(0.1)
+
+
+# ---- 查表法不豁免 4.2.1 横向预留 σ ----
+def test_lookup_pass_does_not_waive_lateral_clearance():
+    # 查表法（4.3.1-1）只覆盖"转弯通道宽度/扫空空间宽度"两项**宽度**判据；
+    # 4.2.1 的横向预留空间 σ 属路线层面的独立要求，查表命中也要校核。
+    # 该工况查表命中，但车货外廓已越出路面边缘（净空为负）→ 应判不通过。
+    res = run_scene(_arc_bundle(lowbed=True, outer=30.0, lane=7.0))
+    m = res.metrics
+    assert m["lookup"] == "pass"
+    assert m["clearance_outer"] < 0 and m["clearance_inner"] < 0
+    assert res.pass_ok is False
+    assert "4.2.1" in m["method"]
+    assert "横向预留" in "\n".join(res.verdict_lines)
+
+
+def test_lookup_pass_with_adequate_clearance_passes():
+    # 同一查表命中的口径下，4.2.1 内/外缘预留满足时仍判通过（示例2"刚好通过"工况）
+    res = run_scene(_arc_bundle(lowbed=True, outer=30.0, lane=9.8))
+    m = res.metrics
+    assert m["lookup"] == "pass"
+    assert m["clearance_inner"] >= m["sigma"] - 1e-6
+    assert res.pass_ok is True
+
+
+def test_clearance_metrics_keep_negative_sign():
+    # 净空指标不再 max(0,·) 截断，与结论文本同符号、可判断越界量
+    res = run_scene(_arc_bundle(lowbed=True, outer=30.0, lane=7.0))
+    m = res.metrics
+    assert m["clearance_outer"] == pytest.approx(
+        m["road_outer"] - m["R_o"], abs=1e-9)
+    assert m["clearance_inner"] == pytest.approx(
+        m["R_i"] - (m["road_outer"] - m["road_lane"]), abs=1e-9)
+    assert m["clearance_inner"] < 0
 
 
 # ---- M4: 直角弯 R_m/W/ΔB 自洽 ----
@@ -296,7 +413,8 @@ def test_right_angle_hydraulic_axle_layer():
 
 
 def test_right_angle_hydraulic_judgement_unchanged():
-    # 加轴线层不影响 5.2.1：W/R_o/R_i 与机械车一致恢复（纯判定口径不变）
+    # 加轴线层不影响 5.2.1：W/R_o/R_i 仍为正值且 right_ok 可判
+    # （液压车自 V1.4.0 起 R_m/W/ΔB 改按"仅板车"刚体几何，见下方新用例）
     tl = _h_trailer(axle_count=4)
     res = run_scene(InputBundle(
         cargo=_cargo(), trailer=tl, tractor=_tractor(),
@@ -310,6 +428,69 @@ def test_right_angle_hydraulic_judgement_unchanged():
     assert "right_ok" in res.metrics
     assert res.metrics["W"] > 0
     assert res.pass_ok in (True, False)
+
+
+# ---- 直角弯液压车：仅板车 + 牵引车出口加宽 ΔW₂ ----
+def _wide_cargo(width=5.0):
+    return CargoParams(weight_t=80, length=10, width=width, height=3.0,
+                       cg_height=1.2, cargo_bearing="干燥的木板", is_overhang=True)
+
+
+def _ra_bundle(hyd=True, entry=18.5, exit_w=14.0, cargo_width=5.0):
+    """直角弯工况：货宽 5.0 > 板宽 3.0（触发 5.2.4 分体扫空校核）。"""
+    return InputBundle(
+        cargo=_wide_cargo(cargo_width),
+        trailer=(_h_trailer(axle_count=4, axle_spacing=1.5) if hyd
+                 else _trailer()),
+        tractor=_tractor(),
+        road=RoadParams(road_type="直角弯道",
+                        right_angle=RightAngleCorner(
+                            entry_width=entry, exit_width=exit_w,
+                            corner_radius=6.0, intersection_angle_deg=90.0),
+                        vertical_clearance=7.5, highway_grade="三级公路"),
+        max_speed_kmh=10.0)
+
+
+def test_right_angle_hydraulic_uses_trailer_only():
+    # 直角弯液压车 R_m/R_o/W 按"仅板车+货物"刚体几何解析量测，不含牵引车
+    res = run_scene(_ra_bundle(hyd=True))
+    m = res.metrics
+    r, env_w, env_l = m["r_path"], max(3.0, 5.0), max(12.0, 10.0)
+    assert m["hydraulic_trailer_only"] is True
+    assert m["R_m"] == pytest.approx(r - env_w / 2.0, abs=1e-9)
+    assert m["R_o"] == pytest.approx(
+        math.hypot(r + env_w / 2.0, env_l / 2.0), abs=1e-9)
+    assert m["W"] == pytest.approx(m["R_o"] - m["R_m"], abs=1e-9)
+    # 换更大的牵引车不改变板车扫空参数
+    b2 = _ra_bundle(hyd=True)
+    b2.tractor.width, b2.tractor.length = 3.5, 12.0
+    m2 = run_scene(b2).metrics
+    for k in ("R_m", "R_o", "W"):
+        assert m2[k] == pytest.approx(m[k], abs=1e-9)
+    # 机械车仍走含牵引车的铰接仿真
+    assert run_scene(_ra_bundle(hyd=False)).metrics[
+        "hydraulic_trailer_only"] is False
+
+
+def test_right_angle_hydraulic_tractor_exit_widening():
+    # 液压车仅按板车计算 → 出口需叠加牵引车外摆加宽 ΔW₂ = 牵引车宽/2
+    m = run_scene(_ra_bundle(hyd=True)).metrics
+    assert m["tractor_swing_widening"] == pytest.approx(0.5 * 2.5, abs=1e-9)
+    assert m["exit_required_w"] == pytest.approx(
+        m["W"] + m["tractor_swing_widening"], abs=1e-9)
+    # 机械车包络已含牵引车 → 不叠加
+    assert run_scene(_ra_bundle(hyd=False)).metrics[
+        "tractor_swing_widening"] == 0.0
+    # 出口宽 7.0：单看 W 够用（6.000 ≥ 5.840），叠加 ΔW₂ 后不足 → 仅因牵引车加宽不通过
+    tight = _ra_bundle(hyd=True, exit_w=7.0)
+    res = run_scene(tight)
+    tm = res.metrics
+    avail = tm["exit_width"] - 2 * tm["sigma"]
+    assert avail >= tm["W"]
+    assert avail < tm["W"] + tm["tractor_swing_widening"]
+    assert tm["split_vehicle_ok"] and tm["split_cargo_ok"]   # 非 5.2.4 引起
+    assert res.pass_ok is False
+    assert "ΔW<sub>2</sub>" in "\n".join(res.verdict_lines)
 
 
 def test_b12_theta_min():

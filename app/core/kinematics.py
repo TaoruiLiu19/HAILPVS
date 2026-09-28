@@ -207,7 +207,8 @@ def build_trajectory_geoms(kin: TractorTrailerKinematics, frames,
 # =====================================================================
 # B.1.2 液压轴线挂车（多轴多轮液压悬挂挂车）闭式解
 # =====================================================================
-def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None):
+def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None,
+                         actual_turn_radius=None):
     """按规范附录 B.1.2 闭式解求液压悬挂挂车的转弯半径、扫空宽度与转弯通道宽度。
 
     中间一轴（或中间两轴）锁死不转向、首尾轴全轮强制转向，各轮绕同一瞬时
@@ -218,14 +219,25 @@ def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None):
       Rmax  = √( [base+(D总+d)/2]² + [L·Na/2 + C]² )  式(B.1.2-5, 含动力机组 C)
       Wd    = Rmax − Rmin + σ                  式(B.1.2-6), σ=安全宽度预留
       R内(轮迹) = base                          式(B.1.2-2)
-      R外(轮迹) = √( [base+La]² + [L·(Na−1)/2]² )    式(B.1.2-3, La 未定义暂以 0)
+      R外(轮迹) = √( [base+La]² + [L·(Na−1)/2]² )    式(B.1.2-3, La 取轮距，见下)
       W_z   = R外(轮迹) − R内(轮迹) + 0.5       式(B.1.2-1)  转弯通道宽度
     式中 d = L轮挂·(首末有效轴距)，L轮挂 为相邻轴线间距(axle_spacing)；
     D总 = 车板长(trailer.length, D3，不含牛颈/连接杆耦合段)；
     C = 动力机组长度(trailer.power_unit_length，缺省 0 → 无 C)；
     σ = TURN_SAFE_CLEARANCE_B12(=0.5)。
-    θ = 第一轴线内侧轮胎转向角(D2)，来源为挂车轴结构最大转向角
-    axle_max_steering_angle_deg，受工程上限 AXLE_STEER_ABS_LIMIT_DEG 钳制(D6)，
+    La = 轮距 b：规范式(B.1.2-3)的 La 在 OCR 版中未给出符号定义。以《道路通过
+    能力》第六章"自走式挂车"最小转弯半径式
+      R_min = √( (l/tanα_max + b)² + l² ) + (B−b)/2      （l=d/2，b=轮距，B=车宽）
+    与本式逐项比对：取 La = 轮距 b 时二者一致（仅差车宽−轮距悬伸项 (B−b)/2），
+    故 La 取 track_width。原暂取 0 会低估 R外(轮迹) 与转弯通道宽度 W_z（偏不安全）。
+    θ = 第一轴线内侧轮胎转向角(D2)。三种来源，优先级：
+      1) 显式传入 turn_angle_theta；
+      2) 传入 actual_turn_radius（实际弯道半径 R）→ 反算 θ = atan(d/(2R))(D9)。
+         此时瞬心偏距 base ≡ R，即 base 等于板车实际走行半径、R_min 恒为正；
+         避免把"结构最大转角下的最紧转弯固有参数"误用于实际弯道（长车板时
+         B.1.2-4 会给出负内缘半径）。
+      3) 均未给 → 挂车轴结构最大转向角 axle_max_steering_angle_deg（固有最不利口径）。
+    θ 受挂车轴结构最大转角与工程上限 AXLE_STEER_ABS_LIMIT_DEG 双重钳制(D6)，
     下端受 MIN_TURN_ANGLE_DEG 防除零。
 
     D1 locked_axles 双口径：默认严格守规范(中间锁死不改变 d)；仅当锁死轴
@@ -253,12 +265,18 @@ def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None):
         d = L * (na - 1)
         spec_mode = True
 
-    # D2/D6：θ 取自挂车轴结构最大转向角，受工程上限与下端 1° 钳制
+    # D2/D6/D9：θ 取值优先级 = 显式值 > 实际弯道半径反算 > 挂车轴结构最大转角
     theta_max_deg = min(float(tl.axle_max_steering_angle_deg),
                         AXLE_STEER_ABS_LIMIT_DEG)
-    theta_deg = (turn_angle_theta if turn_angle_theta is not None
-                 else theta_max_deg)
-    theta_deg = max(MIN_TURN_ANGLE_DEG, min(theta_deg, AXLE_STEER_ABS_LIMIT_DEG))
+    if turn_angle_theta is not None:
+        theta_deg = float(turn_angle_theta)
+    elif actual_turn_radius is not None and float(actual_turn_radius) > 0.0:
+        # D9：板车沿半径 R 走行时瞬心偏距即走行半径，故 tanθ = d/(2R)
+        theta_deg = math.degrees(
+            math.atan(d / (2.0 * float(actual_turn_radius))))
+    else:
+        theta_deg = theta_max_deg
+    theta_deg = max(MIN_TURN_ANGLE_DEG, min(theta_deg, theta_max_deg))
     theta = math.radians(theta_deg)
 
     # 动力机组长度 C（B.1.2-5 根号内横项 +C），界面未给时回退 config 缺省(默认 0 → 无 C)
@@ -284,7 +302,9 @@ def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None):
 
     # —— 转弯通道宽度（轮胎通道，B.1.2-1）：轮迹半径差 + 0.5 ——
     r_veh_in = base                                             # B.1.2-2
-    la = 0.0   # B.1.2-3 中 La：规范未给出定义(OCR残缺)，暂以 0(仅存横项 L(Na−1)/2)，待复核
+    # B.1.2-3 的 La：取轮距 b（规范 OCR 未给定义，与第六章自走式挂车最小转弯
+    # 半径式逐项比对吻合，见函数文档）。原暂取 0 会低估 R外(轮迹) 与 W_z。
+    la = float(tl.track_width)
     r_veh_out = math.hypot(base + la, L * (na - 1) / 2.0)       # B.1.2-3
     w_turn = r_veh_out - r_veh_in + TURN_SAFE_CLEARANCE_B12    # B.1.2-1
 
@@ -306,31 +326,46 @@ def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None):
         "R_vehicle_in": r_veh_in, "R_vehicle_out": r_veh_out,
         "power_unit_len": power_unit_len,
         "base": base, "theta_deg": round(theta_deg, 4),
-        "d": d, "D_total": d_total,
+        "d": d, "D_total": d_total, "La": la,
+        "turn_radius": (float(actual_turn_radius)
+                        if actual_turn_radius else None),
+        "theta_source": ("explicit" if turn_angle_theta is not None
+                         else ("turn_radius" if actual_turn_radius
+                               else "axle_max")),
         "spec_mode": spec_mode, "locked": locked,
         "sweep_center_dist": base,      # D5 瞬心横向偏距(轨迹层用)
         "warnings": warnings_,
     }
 
 
-def hydraulic_coupling_draw_anchor(bundle: InputBundle, tractor_rear_x,
-                                   tractor_rear_y, psi):
-    """D8: 仅绘图。返回挂车车板前端锚点(相对牵引车后沿偏移 coupling_length)。
+def hydraulic_rigid_sweep_radii(bundle: InputBundle, turn_radius: float):
+    """液压轴线挂车（板车）绕转弯圆心的刚体扫空内/外径——**仅板车+货物，不含牵引车**。
 
-    牵引车后边沿 + 连接部分长度·挂车航向 → 挂车车板前端；车板自前端向后延伸
-    length 得到车尾。不参与 D_total/R/W_swept/W_turn 计算，仅影响绘图定位。
+    依据规范 B.1.2 条文说明：「牵引车+多轴多轮液压悬挂挂车的转弯半径由所牵引的
+    液压悬挂挂车转弯半径决定，牵引车因车身较短，转弯角度大，基本不增加车辆整体
+    转弯半径」。故内/外缘预留（4.2.1）应按板车自身外廓量测，与第六章"自走式挂车"
+    模型一致（该章亦明确牵引车对转弯半径可不予考虑）。
+
+    几何：板车绕道路圆心 O 做刚体圆周转动，车板中心位于半径 R 的圆周上；刚体转动
+    时航向恒垂直于半径（取切向），故车板+货物包络矩形 (env_len × env_w) 上任一点
+    P = C + u·t̂ + v·r̂（u∈±env_len/2，v∈±env_w/2）满足 |P|² = (R+v)² + u²，于是
+      R_o（最外缘，外前/外后角）= √( (R + env_w/2)² + (env_len/2)² )
+      R_i（最内缘，内侧长边中点）  = R − env_w/2
+    返回 (R_o, R_i)。
     """
-    tl = bundle.trailer
-    off = float(tl.coupling_length or 0.0)
-    return (tractor_rear_x + off * math.cos(psi),
-            tractor_rear_y + off * math.sin(psi))
+    tl, cargo = bundle.trailer, bundle.cargo
+    env_len = max(float(tl.length), float(cargo.length))
+    env_w = max(float(tl.width), float(cargo.width))
+    r = float(turn_radius)
+    r_out = math.hypot(r + env_w / 2.0, env_len / 2.0)
+    r_in = max(r - env_w / 2.0, 0.0)
+    return r_out, r_in
 
 
 # =====================================================================
 # 阶段二：液压轴线挂车瞬心轨迹 + 多轴转向绘制（D5）
 # =====================================================================
 def axle_steering_geoms(base_x, base_y, psi, trailer, rho,
-                        want=("first", "last", "midlock"),
                         na=None, locked_axles=None):
     """绕瞬心转向的轴组几何（第六章定点转向，D5/D8 绘图用）。
 
@@ -343,8 +378,8 @@ def axle_steering_geoms(base_x, base_y, psi, trailer, rho,
     a_i 为该轴到轴组中心的纵向差 —— 首/末轴转角最大且方向相反，指向瞬心；
     锁死轴 δ=0；非锁死轴受 ±axle_max_steering_angle_deg 钳制。
 
-    返回 [(轴序号, 轴中点(cx,cy), δ_i°, 轮距半宽, 是否锁死), ...]，
-    已按 want 选出绘制轴：奇轴含中间闭锁轴((Na+1)//2)，偶轴无闭锁轴只出首末。
+    返回 [(轴序号, 轴中点(cx,cy), δ_i°, 轮距半宽, 是否锁死), ...]（仅绘制用，
+    全部轴按 na 计算，不再有未实现的 want 过滤参数）。
     """
     if na is None:
         na = max(int(trailer.axle_count), 2)
@@ -419,8 +454,6 @@ def hydraulic_arc_trajectory(bundle: InputBundle, b12, radius, turn_deg,
     axle_geoms = {"psi": ψ, "rho": rho, "axles": [(idx,cx,cy,δ°,半轮距,锁死),...]}
     机械车不调用本函数，仍走 build_trajectory_geoms 铰接尾随。
     """
-    from shapely.geometry import Polygon, MultiPolygon
-
     tl = bundle.trailer
     R = float(radius)
     rho = float(b12["sweep_center_dist"])          # D5 瞬心横向偏距≈base
