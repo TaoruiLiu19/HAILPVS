@@ -126,83 +126,27 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
     _add_param_table(doc, meta.get("params", []), "二、弯道输入参数")
 
     # —— 三、车道与车辆扫掠结果 ——
+    # 只保留最关键信息（所需/可供宽度、内外缘净空、结论类）；计算口径与推导过程
+    # 不在此表赘述，详见"五、检验结论"的检验过程。
     rows = []
     m = res.metrics
     rows.append(("公路等级", m.get('highway_grade', '')))
-    rows.append(("横向预留空间 σ (m)", f"{m.get('sigma', 0):.3f}"))
     rows.append(("大件运输尺寸级", m.get('size_grade', '')))
-    rows.append(("判定方法", m.get('method', '')))
     if res.scene == "arc":
-        rows.append(("弯道类型", "圆弧弯道"))
-        if m.get('trajectory_source') == "B.1.2":
-            rows.append(("扫空量测口径", "仅板车+货物刚体几何（不含牵引车，B.1.2 条文说明）"))
-        else:
-            rows.append(("扫空量测口径", "铰接尾随仿真（包络含牵引车，B.1.1）"))
-        # R_o 即"所需最小弯道外半径"（metrics['R_min'] 与 R_o 同值），合并为一行
-        rows.append(("车辆扫掠外径 R_o（=所需最小弯道外半径）(m)", f"{m.get('R_o',0):.3f}"))
-        rows.append(("车辆扫掠内径 R_i (m)", f"{m.get('R_i',0):.3f}"))
-        rows.append(("扫空空间宽度 W_d / W_swept (m)", f"{m.get('W_needed',0):.3f}"))
-        # metrics['W'] 与 'turn_channel_w' 同值，合并为一行
-        rows.append(("转弯通道宽度 W_z（含0.5m安全宽度）(m)", f"{m.get('W',0):.3f}"))
-        rows.append(("转弯通道宽度口径",
-                     "液压：B.1.2-1 轮迹 R外−R内+σ（La=轮距）；机械：扫空宽度+σ"
-                     if m.get('trajectory_source') == "B.1.2"
-                     else "机械挂车：仿真扫空宽度 + 0.5m 安全宽度"))
-        if m.get('trailer_turn_radius') is not None:
-            rows.append(("车辆/板车实际走行半径 (m)", f"{m.get('trailer_turn_radius',0):.3f}"))
-        rows.append(("路面宽度 (m)", f"{m.get('road_width',0):.3f}"))
-        rows.append(("横向空间宽度 (m)", f"{m.get('transverse_space_w',0):.3f}"))
-        rows.append(("外缘净空 (m)", f"{m.get('clearance_outer',0):.3f}"))
-        rows.append(("内缘净空 (m)", f"{m.get('clearance_inner',0):.3f}"))
-        rows.append(("内/外缘预留 σ 校核（4.2.1）",
-                     "满足" if (m.get('clearance_outer', 0) >= m.get('sigma', 0)
-                                and m.get('clearance_inner', 0) >= m.get('sigma', 0))
-                     else "不满足"))
-        if "B1_2_Rin" in m:
-            rows.append(("液压挂车最内转弯半径 B.1.2 (m)", f"{m.get('B1_2_Rin',0):.3f}"))
-            rows.append(("液压挂车最外转弯半径 B.1.2 (m)", f"{m.get('B1_2_Rout',0):.3f}"))
-            rows.append(("液压挂车扫空宽度 Wd=Rmax−Rmin+σ (m)", f"{m.get('B1_2_Wd', m.get('B1_2_W',0)):.3f}"))
-            rows.append(("液压挂车转弯通道宽度 W_z=R外(轮迹)−R内(轮迹)+σ (m)",
-                         f"{m.get('B1_2_W_turn',0):.3f}"))
-            rows.append(("液压 B.1.2-3 横项 La（取轮距）(m)", f"{m.get('B1_2_La',0):.3f}"))
-            rows.append(("液压 θ 取值来源",
-                         {"turn_radius": "按实际弯道半径反算 tanθ=d/(2R)",
-                          "axle_max": "挂车轴结构最大转角（固有最不利）",
-                          "explicit": "显式给定"}.get(m.get('B1_2_theta_source'), '')))
-            rows.append(("液压动力机组长度 C (m)", f"{m.get('B1_2_power_unit_len',0):.3f}"))
-            rows.append(("液压 θ(首轴转向角) B.1.2 (°)", f"{m.get('B1_2_theta_deg',0):.3f}"))
-            rows.append(("液压车板总长 D_总 (m)", f"{m.get('B1_2_D_total',0):.3f}"))
-            rows.append(("B.1.2 口径",
-                         "严格守规范" if m.get('B1_2_spec_mode', True)
-                         else "规范外推(首/末轴锁死)"))
-            rows.append(("轨迹/扫空来源", m.get('trajectory_source', '')))
+        rows.append(("扫空空间宽度 (m)", f"{m.get('W_needed', 0):.3f}"))
+        rows.append(("转弯通道宽度 (m)", f"{m.get('W', 0):.3f}"))
+        rows.append(("路面宽度 (m)", f"{m.get('road_width', 0):.3f}"))
+        rows.append(("横向空间宽度 (m)", f"{m.get('transverse_space_w', 0):.3f}"))
+        rows.append(("外缘净空 (m)", f"{m.get('clearance_outer', 0):.3f}"))
+        rows.append(("内缘净空 (m)", f"{m.get('clearance_inner', 0):.3f}"))
     else:
-        rows.append(("弯道类型", "直角弯道(平面交叉转弯)"))
-        rows.append(("R_m/W/ΔB 口径",
-                     "仅板车+货物刚体（液压，不含牵引车）"
-                     if m.get('hydraulic_trailer_only') else "铰接尾随仿真（含牵引车）"))
-        rows.append(("入口宽度 W_en (m)", f"{m.get('entry_width',0):.3f}"))
-        rows.append(("出口宽度 W_turn (m)", f"{m.get('exit_width',0):.3f}"))
-        rows.append(("最内侧转弯半径 R_m (m)", f"{m.get('R_m',0):.3f}"))
-        rows.append(("扫空空间最大宽度 W (m)", f"{m.get('W',0):.3f}"))
-        rows.append(("车货总宽度 B_t (m)", f"{m.get('B_t',0):.3f}"))
-        rows.append(("外摆值 ΔB (m)", f"{m.get('deltaB',0):.3f}"))
-        rows.append(("牵引车外摆加宽 ΔW2 (m)", f"{m.get('tractor_swing_widening',0):.3f}"))
-        rows.append(("所需宽度 req_w=max(B_t+ΔB, W+ΔW2) (m)", f"{m.get('required_w',0):.3f}"))
-        rows.append(("入口净宽 (m)", f"{m.get('entry_net_w',0):.3f}"))
-        rows.append(("出口净宽 (m)", f"{m.get('exit_net_w',0):.3f}"))
-        rows.append(("右转判定（入口与出口同时满足）",
-                     "满足" if m.get('right_ok') else
-                     ("不满足（%s）" % "、".join(
-                         [n for n, o in (("入口", m.get('entry_ok')),
-                                         ("出口", m.get('exit_ok'))) if not o]))))
-        rows.append(("左转判定（物理区与左转处同时满足，仅参考）",
-                     "满足" if m.get('left_ok') else "不满足"))
-        rows.append(("所需最小出口转弯带 W2_min (m，参考)", f"{m.get('W2_min',0):.3f}"))
-    rows.append(("车货总高 (m)", f"{m.get('total_height',0):.3f}"))
-    rows.append(("垂直净空校验", "满足" if m.get('vert_clearance_ok') else "不满足"))
-    rows.append(("侧滑/侧翻临界速度 (km/h)",
-                 f"{m.get('Vch',0):.2f} / {m.get('Vcv',0):.2f}"))
+        rows.append(("最内侧转弯半径 R_m (m)", f"{m.get('R_m', 0):.3f}"))
+        rows.append(("扫空空间宽度 W (m)", f"{m.get('W', 0):.3f}"))
+        rows.append(("外摆值 ΔB (m)", f"{m.get('deltaB', 0):.3f}"))
+        rows.append(("入口净宽 (m)", f"{m.get('entry_net_w', 0):.3f}"))
+        rows.append(("出口净宽 (m)", f"{m.get('exit_net_w', 0):.3f}"))
+    rows.append(("车货总高 (m)", f"{m.get('total_height', 0):.3f}"))
+    rows.append(("垂直净空", "满足" if m.get('vert_clearance_ok') else "不满足"))
     rows.append(("横向稳定性", "满足" if m.get('ok') else "不满足"))
     _add_param_table(doc, rows, "三、车道与车辆扫掠结果")
 

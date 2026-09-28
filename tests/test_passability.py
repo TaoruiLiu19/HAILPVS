@@ -219,7 +219,7 @@ def test_lookup_pass_does_not_waive_lateral_clearance():
     assert m["lookup"] == "pass"
     assert m["clearance_outer"] < 0 and m["clearance_inner"] < 0
     assert res.pass_ok is False
-    assert "4.2.1" in m["method"]
+    assert "横向预留" in m["method"]
     assert "横向预留" in "\n".join(res.verdict_lines)
 
 
