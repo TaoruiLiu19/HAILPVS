@@ -61,6 +61,40 @@ def _pick_poses(vgeoms, n=POSE_FRAMES):
     return chosen[:n]
 
 
+def _pick_straight_poses(vgeoms, turn_deg, center=(0.0, 0.0)):
+    """挑「入弯前（直行）」与「完全出弯后（直行）」各一个姿态，返回 (entry, exit)。
+
+    判定同 `_pick_curve_poses`：参考点相对转弯圆心的方位角 < 0 属入弯直道段，
+    > turn_deg 属出弯直道段；各取该段索引中位数处的帧，使车落在直道中段。
+    对应段不存在时该项返回 None。
+    """
+    if not vgeoms:
+        return None, None
+    cx, cy = center
+    before, after = [], []
+    for i, f in enumerate(vgeoms):
+        ang = math.degrees(math.atan2(f[1] - cy, f[0] - cx))
+        if ang < 0.0:
+            before.append(i)
+        elif ang > turn_deg:
+            after.append(i)
+    return (vgeoms[before[len(before) // 2]] if before else None,
+            vgeoms[after[len(after) // 2]] if after else None)
+
+
+def _pick_arc_poses(vgeoms, turn_deg, center=(0.0, 0.0)):
+    """圆弧弯道绘图姿态：**入弯前直行 1 辆 + 弯道内 2 辆 + 完全出弯后直行 1 辆**。
+
+    顺序固定为 [入弯前, 弯道内①, 弯道内②, 出弯后]，使下标 0 恒为"入弯前"那辆——
+    车/货长宽尺寸标注即画在它上面（渲染层取 `vehicle_frames[0]`）。
+    """
+    curve = _pick_curve_poses(vgeoms, turn_deg, center, n=2)
+    entry, exit_ = _pick_straight_poses(vgeoms, turn_deg, center)
+    poses = ([entry] if entry is not None else []) + list(curve) \
+        + ([exit_] if exit_ is not None else [])
+    return poses or _pick_poses(vgeoms, 2)
+
+
 def _pick_curve_poses(vgeoms, turn_deg, center=(0.0, 0.0), n=2):
     """只挑**落在弯道弧段上**的 n 个姿态，剔除入弯/出弯直道上的姿态。
 
@@ -464,8 +498,9 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         r_veh, (lane / 2.0, lane / 2.0, lane / 2.0), _TURN_DEG)
     res.road = road_poly
     res.swept = swept
-    # 圆弧弯道：只画**弯道内**的两辆车（剔除入/出弯直道姿态）
-    res.vehicle_frames = _pick_curve_poses(vgeoms, _TURN_DEG, center, n=2)
+    # 圆弧弯道绘图姿态：入弯前直行 1 + 弯道内 2 + 完全出弯后直行 1 = 4 辆
+    # （下标 0 恒为"入弯前"那辆，车/货长宽尺寸标注画在它上面）
+    res.vehicle_frames = _pick_arc_poses(vgeoms, _TURN_DEG, center)
     res.metrics.update({
         "R_o": r_o, "R_i": r_i, "W_needed": swept_w,
         "W": turn_channel_w,

@@ -430,22 +430,24 @@ def test_right_angle_hydraulic_judgement_unchanged():
     assert res.pass_ok in (True, False)
 
 
-# ---- 圆弧弯道：只画弯道内两辆车 ----
-def test_arc_draws_two_poses_on_curve_only():
-    # 入/出弯直道姿态不画；两辆车都落在弧段内（方位角 ∈ [0, turn_deg]）
+# ---- 圆弧弯道：入弯前 / 弯道内×2 / 出弯后 共 4 辆车 ----
+def test_arc_draws_four_poses_entry_curve_exit():
+    # 顺序固定 [入弯前, 弯道内①, 弯道内②, 出弯后]，下标 0 用于车/货尺寸标注
     for lowbed in (True, False):
-        b = _arc_bundle(lowbed=lowbed, outer=30.0, lane=7.0)
-        res = run_scene(b)
-        assert len(res.vehicle_frames) == 2
-        for f in res.vehicle_frames:
-            ang = math.degrees(math.atan2(f[1], f[0]))
-            assert 0.0 <= ang <= 140.0 + 1e-6, f"姿态不在弧段上：{ang:.1f}°"
-        # 两辆车分开在弧中段两侧（不挤在一起）
-        a0 = math.degrees(math.atan2(res.vehicle_frames[0][1],
-                                     res.vehicle_frames[0][0]))
-        a1 = math.degrees(math.atan2(res.vehicle_frames[1][1],
-                                     res.vehicle_frames[1][0]))
-        assert a1 - a0 > 30.0
+        res = run_scene(_arc_bundle(lowbed=lowbed, outer=30.0, lane=7.0))
+        assert len(res.vehicle_frames) == 4
+
+        def ang(f):
+            return math.degrees(math.atan2(f[1], f[0]))
+        a = [ang(f) for f in res.vehicle_frames]
+        assert a[0] < 0.0, f"第 0 辆应为入弯前直行，实际 {a[0]:.1f}°"
+        assert 0.0 <= a[1] <= 140.0 + 1e-6 and 0.0 <= a[2] <= 140.0 + 1e-6
+        assert a[2] - a[1] > 30.0, "弯道内两辆应分开"
+        assert a[3] > 140.0, f"第 3 辆应为完全出弯后直行，实际 {a[3]:.1f}°"
+        # 入/出弯两辆在同一走行半径的直道上，参考点到圆心距离 > 走行半径
+        r_veh = res.metrics["trailer_turn_radius"]
+        assert math.hypot(*res.vehicle_frames[0][:2]) > r_veh
+        assert math.hypot(*res.vehicle_frames[3][:2]) > r_veh
 
 
 # ---- 直角弯液压车：仅板车（规范 5.2.1 口径）+ 可选 ΔW₂ ----

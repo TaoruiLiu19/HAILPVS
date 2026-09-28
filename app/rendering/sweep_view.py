@@ -364,14 +364,20 @@ def _annotate_rect_dims(ax, geom, prefix, offset, color=DIM_COLOR, text_off=1.7,
                 bbox=dict(facecolor="white", edgecolor="none", pad=1.0), zorder=4)
 
 
-def _hydraulic_front_anchor(trailer_geom, frame0, frame1):
+def _hydraulic_front_anchor(trailer_geom, frame0, frame1, heading=None):
     """液压车（无牵引车图形）的“车头前端”锚点，使宽度标注稳定落向车尾。
 
-    用首帧行驶方向(后一帧位置−首帧位置)作为车板纵向前向，把锚点放在车板
-    前端短边外侧；_annotate_rect_dims 取距它最远的短边 = 车尾短边。
+    前向优先取**该帧自身航向** heading（帧携带 axle_geoms 时即 psi，精确）；
+    无航向时退化为"首帧→次帧"的弦方向。锚点放在车板前端短边外侧；
+    `_annotate_rect_dims` 取距它最远的短边 = 车尾短边。
+
+    注：圆弧弯道现在同时画入弯前/弯道内/出弯后的车，相邻帧不再共线，
+    故必须用自身航向而非弦方向，否则宽度标注会落到错误的短边。
     """
     ux, uy = 0.0, 1.0
-    if frame1 is not None:
+    if heading is not None:
+        ux, uy = math.cos(heading), math.sin(heading)
+    elif frame1 is not None:
         dx, dy = frame1[0] - frame0[0], frame1[1] - frame0[1]
         dl = math.hypot(dx, dy)
         if dl > 1e-6:
@@ -434,9 +440,12 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
             # 机械车：以牵引车形心为“车头”锚点，宽度标注落在车尾侧、避开车头
             rear_anchor = (_fg[-1].centroid.x, _fg[-1].centroid.y)
         else:
-            # 液压车（无车头图形）：按首帧行驶方向合成车头前端锚点，宽度线落向车尾
+            # 液压车（无车头图形）：用该帧自身航向 psi 合成车头前端锚点，宽度线落向车尾
             _nf = res.vehicle_frames[1] if len(res.vehicle_frames) > 1 else None
-            rear_anchor = _hydraulic_front_anchor(_first[3], _first, _nf)
+            _psi = (_first[5].get("psi")
+                    if len(_first) > 5 and _first[5] else None)
+            rear_anchor = _hydraulic_front_anchor(_first[3], _first, _nf,
+                                                 heading=_psi)
         _annotate_rect_dims(ax, _first[3], "车", 3.2, color=DIM_COLOR,
                             rear_anchor=rear_anchor)
         _annotate_rect_dims(ax, _first[4], "货", 6.6, color=DIM_COLOR,

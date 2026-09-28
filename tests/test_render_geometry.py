@@ -249,7 +249,7 @@ def _point_line_dist(pt, ln):
 def test_locked_axle_extension_passes_turn_center(factory, expected):
     # 规范 B.1.2："依次到中间不转向的一轴线（锁死轴）"——其轴线延长线即指向瞬心。
     # 弯道内每辆车各画一根，全部须通过转弯圆心，且**只画到圆心为止、不加文字**。
-    # 圆弧弯道两辆车都在弧上 → 2 根；直角弯仍按原 3 姿态，仅弧上那辆出线 → 1 根。
+    # 圆弧弯道共 4 辆车，仅弯道内那 2 辆出线；直角弯仍按原 3 姿态，仅弧上那辆出线 → 1 根。
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     from app.rendering.sweep_view import build_figure
@@ -268,6 +268,30 @@ def test_locked_axle_extension_passes_turn_center(factory, expected):
             assert min(math.dist(e, center) for e in ends) < 0.05
         # 图上不再出现"锁死轴"文字
         assert not any("锁死轴" in t.get_text() for t in ax.texts)
+    finally:
+        matplotlib.pyplot.close(fig)
+
+
+def test_arc_dimension_annotation_on_entry_vehicle():
+    # 车/货长宽尺寸标注须画在**入弯前**那辆（vehicle_frames[0]）上
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from app.rendering.sweep_view import build_figure
+
+    res = run_scene(_hydraulic_arc_bundle())
+    assert len(res.vehicle_frames) == 4
+    entry_xy = tuple(res.vehicle_frames[0][:2])
+    curve_xy = [tuple(f[:2]) for f in res.vehicle_frames[1:3]]
+    fig, ax = build_figure(res)
+    try:
+        labels = [t for t in ax.texts
+                  if t.get_text().startswith(("车长", "车宽", "货长", "货宽"))]
+        assert len(labels) == 4, f"应有车/货长宽 4 条标注，实际 {len(labels)}"
+        for t in labels:
+            p = t.get_position()
+            d_entry = math.dist(p, entry_xy)
+            assert all(d_entry < math.dist(p, c) for c in curve_xy), \
+                f"{t.get_text()} 未画在入弯前那辆上"
     finally:
         matplotlib.pyplot.close(fig)
 
