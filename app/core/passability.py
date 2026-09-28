@@ -61,6 +61,28 @@ def _pick_poses(vgeoms, n=POSE_FRAMES):
     return chosen[:n]
 
 
+def _pick_curve_poses(vgeoms, turn_deg, center=(0.0, 0.0), n=2):
+    """只挑**落在弯道弧段上**的 n 个姿态，剔除入弯/出弯直道上的姿态。
+
+    判定用"参考点相对转弯圆心的方位角"：稳态弧段上参考点的方位角即弧参数
+    φ ∈ [0, turn_deg]；入弯直道上参考点位于该弧切点之前（方位角 < 0），出弯直道上
+    位于其后（> turn_deg），据此精确剔除。**不用半径判定**——机械铰接尾随仿真在长弧上
+    存在数值漂移（实测走行半径 26.5 → 26.39），用半径容差会漏掉大半个弧的帧。
+
+    姿态按 (k+0.5)/n 分位取，使车落在弧中段、不压弧端；可用帧不足时回退 `_pick_poses`。
+    """
+    if not vgeoms:
+        return []
+    cx, cy = center
+    idx = [i for i, f in enumerate(vgeoms)
+           if 0.0 <= math.degrees(math.atan2(f[1] - cy, f[0] - cx)) <= turn_deg]
+    if len(idx) < n:
+        return _pick_poses(vgeoms, n)
+    return [vgeoms[idx[min(len(idx) - 1,
+                           int(round((k + 0.5) / n * (len(idx) - 1))))]]
+            for k in range(n)]
+
+
 class SweepScenarioResult:
     """一次检验的完整结果。"""
     def __init__(self):
@@ -442,7 +464,8 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         r_veh, (lane / 2.0, lane / 2.0, lane / 2.0), _TURN_DEG)
     res.road = road_poly
     res.swept = swept
-    res.vehicle_frames = _pick_poses(vgeoms)
+    # 圆弧弯道：只画**弯道内**的两辆车（剔除入/出弯直道姿态）
+    res.vehicle_frames = _pick_curve_poses(vgeoms, _TURN_DEG, center, n=2)
     res.metrics.update({
         "R_o": r_o, "R_i": r_i, "W_needed": swept_w,
         "W": turn_channel_w,
@@ -773,22 +796,14 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         sigma = float(road.lateral_clearance)
     else:
         sigma = float(INTERSECTION_RESERVE)
-    # 液压车按"仅板车"计算时，牵引车外轮可能在挂车轨迹线以外，出口需加宽 ΔW₂。
-    # 参考文献《道路通过能力》第六章"牵引车对转弯的影响"（表6-1 注：ΔW₂ = d/2 − 0.16，
-    # d = 牵引车宽度）；本系统取保守上限 ΔW₂ = 牵引车宽 × TRACTOR_SWING_EXIT_FACTOR。
-    # 机械车包络已含牵引车，不再叠加。
+    # 规范 5.2.1：式(5.2.1-1) 右端 = B_r + ΔB，式(5.2.1-2) 右端 = W；因
+    # ΔB = max(0, W−B_t) 且车体总宽 B_t 恒 ≤ 扫空宽度 W，故 B_t+ΔB = W，两式
+    # 等价于"W 须同时 ≤ 入口净宽与出口净宽"。
+    # ΔW₂ 为**规范之外的附加保守余量**（默认 0.0＝严格按规范；>0 时报告标注），
+    # 见 config.TRACTOR_SWING_EXIT_FACTOR 注释。
     deltaW2 = (TRACTOR_SWING_EXIT_FACTOR * bundle.tractor.width
                if hydraulic else 0.0)
 
-    # 判定（5.2.1）——所需宽度须**同时**小于入口与出口（右转 5.2.1-1/-2、
-    # 左转 5.2.1-3/-4 各自的可通行宽度都要满足）：
-    #   所需宽度 req_w = max(B_t + ΔB, W + ΔW₂)
-    #   右转：入口净宽(entry−2σ) 与 出口净宽(exit−2σ) 都要 ≥ req_w
-    #   左转：W_section−σ 与 W_lturn−σ 都要 ≥ req_w
-    # 说明：ΔW₂（牵引车外摆加宽）不再只加在出口——牵引车在进口侧同样可能外摆，
-    # 故入口也按含 ΔW₂ 的所需宽度校核（较规范 5.2.1-1 的 B_r+ΔB 口径更保守）。
-    # 又因 ΔB = max(0, W − B_t) 时 B_t+ΔB = max(B_t, W)，而车体总宽 B_t 恒 ≤ 扫空
-    # 宽度 W，故 B_t+ΔB = W，req_w 实际等于 max(W, W+ΔW₂) = W + ΔW₂。
     req_w = max(B_t + deltaB, W + deltaW2)
     W_section = ra.W_section if ra.W_section is not None else entry_w
     W_lturn = ra.W_lturn if ra.W_lturn is not None else exit_w
@@ -865,14 +880,15 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         *((
             f"牵引车外摆加宽 ΔW<sub>2</sub> = {TRACTOR_SWING_EXIT_FACTOR:g} × 牵引车宽 = "
             f"{TRACTOR_SWING_EXIT_FACTOR:g} × {bundle.tractor.width:.2f} = {deltaW2:.3f} m"
-            "（参考文献《道路通过能力》第六章「牵引车对转弯的影响」：牵引车外轮可能超出"
-            "挂车轨迹线；表6-1 简化为 d/2 − 0.16。本系统按最不利计入，"
-            "进口与出口均按含 ΔW<sub>2</sub> 的所需宽度校核）",
-        ) if hydraulic else ()),
+            "（规范 5.2.1 之外的附加安全余量，出自参考文献《道路通过能力》第六章"
+            "「牵引车对转弯的影响」；默认关闭＝严格按规范，开启时进出口均计入）",
+        ) if deltaW2 > 0 else ()),
         "所需宽度 req_w = max(B<sub>t</sub> + ΔB, W"
-        + (" + ΔW<sub>2</sub>" if hydraulic else "")
-        + f") = max({B_t + deltaB:.3f}, {W + deltaW2:.3f}) = {req_w:.3f} m",
-        "右转判定（入口与出口须**同时**满足）：",
+        + (" + ΔW<sub>2</sub>" if deltaW2 > 0 else "")
+        + f") = max({B_t + deltaB:.3f}, {W + deltaW2:.3f}) = {req_w:.3f} m"
+        "（因 B<sub>t</sub> ≤ W 且 ΔB = max(0, W−B<sub>t</sub>)，B<sub>t</sub>+ΔB = W，"
+        "故规范两式等价于「W 同时 ≤ 入口净宽与出口净宽」）",
+        "右转判定（入口与出口须同时满足）：",
         _judge_line("W<sub>en</sub> − 2σ", entry_w - 2 * sigma,
                     "req_w", req_w, entry_ok),
         _judge_line("W<sub>turn</sub> − 2σ", exit_w - 2 * sigma,
@@ -881,7 +897,7 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         + ("" if right_ok else
            "（" + "、".join([n for n, o in (("入口不足", entry_ok),
                                           ("出口不足", exit_ok)) if not o]) + "）"),
-        "左转判定（物理区与左转处须**同时**满足）：",
+        "左转判定（物理区与左转处须同时满足）：",
         _judge_line("W<sub>section</sub> − σ", W_section - sigma,
                     "req_w", req_w, section_ok),
         _judge_line("W<sub>lturn</sub> − σ", W_lturn - sigma,

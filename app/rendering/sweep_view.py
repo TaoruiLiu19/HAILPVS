@@ -134,14 +134,11 @@ def _locked_axle_axis_line(ax, frame, center, tol=0.15, color=AXLE_COLOR):
     if math.hypot(mx + t_star * nx - cx, my + t_star * ny - cy) > tol:
         return False                                 # 瞬心不在此轴线上（直道/口径不符）
     half_track = float(locked[0][4])
-    t0, t1 = -(half_track + 2.0), t_star + 3.5       # 外端让开板车半宽；内端穿过圆心
+    t0, t1 = -(half_track + 2.0), t_star           # 外端让开板车半宽；内端**止于转弯圆心**
     if t0 > t1:
         t0, t1 = t1, t0
     ax.plot([mx + t0 * nx, mx + t1 * nx], [my + t0 * ny, my + t1 * ny],
             color=color, linewidth=0.8, linestyle=(0, (7, 3)), zorder=3)
-    ax.text(mx + t1 * nx, my + t1 * ny, "锁死轴轴线延长线", color=color,
-            fontsize=8.5, ha="center", va="center", family="Microsoft YaHei",
-            bbox=dict(facecolor="white", edgecolor="none", pad=1.2), zorder=4)
     return True
 
 
@@ -243,6 +240,39 @@ def _annotate_radius(ax, center, radius, span_deg, label, side, road=None,
             ha="center", va="center", family="Microsoft YaHei",
             bbox=dict(facecolor="white", edgecolor="none", pad=1.5),
             zorder=4)
+
+
+def _band_angle_avoiding(frames, center, r_in, r_out, turn_deg, label_pad=3.0):
+    """为径向宽度标注线挑一个**不与已画车辆轮廓重叠**的角度（度）。
+
+    在 [8°, turn_deg−7°] 内逐度试算：以该角度作从 r_in−0.5 到 r_out+label_pad 的
+    径向线段（含引出到文字的段落），若与任一车辆包络/货物多边形都不相交即视为可用；
+    在所有可用角度里取**最靠近弧中点**的那个（既不压车、又落在弯道中段）；
+    全被占时退回弧中点。
+    """
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+
+    polys = []
+    for f in frames:
+        for g in (f[2] if len(f) > 2 else None, f[4] if len(f) > 4 else None):
+            if g is not None and not g.is_empty:
+                polys.append(g)
+    veh = unary_union(polys) if polys else None
+    cx, cy = center
+    mid = float(turn_deg) * 0.5
+    free = []
+    for a in range(8, max(9, int(round(turn_deg)) - 6)):
+        ar = math.radians(a)
+        seg = LineString([(cx + (r_in - 0.5) * math.cos(ar),
+                           cy + (r_in - 0.5) * math.sin(ar)),
+                          (cx + (r_out + label_pad) * math.cos(ar),
+                           cy + (r_out + label_pad) * math.sin(ar))])
+        if veh is None or not seg.intersects(veh):
+            free.append(float(a))
+    if not free:
+        return mid
+    return min(free, key=lambda a: abs(a - mid))
 
 
 def _annotate_band(ax, center, r_in, r_out, ang_deg, label):
@@ -471,14 +501,15 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
 
     # —— 液压车：锁死轴轴线延长线（指向转弯圆心）——
     #    仅液压车有轴层（帧携带 axle_geoms）；机械车（铰接尾随）不画，绘图口径不变。
-    #    只画一根，且仅在该轴线确实过圆心时绘制（弧上成立、直道自动跳过）。
+    #    弯道内每辆车都画一根，且只画到转弯圆心为止（不过冲、不加文字）。
     if any(len(f) > 5 and f[5] for f in res.vehicle_frames):
         for _f in res.vehicle_frames:
-            if _locked_axle_axis_line(ax, _f, center):
-                break
+            _locked_axle_axis_line(ax, _f, center)
 
     # —— 扫掠环带宽度标注 ——
-    mid_ang = turn_deg * 0.5
+    #    标注角取"最空"的径向方位，避免标注线与已画车辆轮廓重叠
+    mid_ang = _band_angle_avoiding(res.vehicle_frames, center,
+                                   r_i, r_o, turn_deg)
     band_w = max(r_o - r_i, 0.0)
     if scene == "arc":
         if r_i > 0.5 and r_o > 0.5 and band_w > 0:

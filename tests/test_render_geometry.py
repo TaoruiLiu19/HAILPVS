@@ -244,10 +244,12 @@ def _point_line_dist(pt, ln):
     return abs(dy * pt[0] - dx * pt[1] + x2 * y1 - y2 * x1) / math.hypot(dx, dy)
 
 
-@pytest.mark.parametrize("factory", [_hydraulic_arc_bundle, _right_angle_bundle])
-def test_locked_axle_extension_passes_turn_center(factory):
+@pytest.mark.parametrize("factory,expected", [(_hydraulic_arc_bundle, 2),
+                                              (_right_angle_bundle, 1)])
+def test_locked_axle_extension_passes_turn_center(factory, expected):
     # 规范 B.1.2："依次到中间不转向的一轴线（锁死轴）"——其轴线延长线即指向瞬心。
-    # 液压车须恰好画一根，且该线通过转弯圆心。
+    # 弯道内每辆车各画一根，全部须通过转弯圆心，且**只画到圆心为止、不加文字**。
+    # 圆弧弯道两辆车都在弧上 → 2 根；直角弯仍按原 3 姿态，仅弧上那辆出线 → 1 根。
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     from app.rendering.sweep_view import build_figure
@@ -257,10 +259,15 @@ def test_locked_axle_extension_passes_turn_center(factory):
     fig, ax = build_figure(res)
     try:
         lines = _dashed_axle_lines(ax)
-        assert len(lines) == 1, f"应只画锁死轴一根，实际 {len(lines)} 根"
+        assert len(lines) == expected, f"应画 {expected} 根，实际 {len(lines)} 根"
         center = tuple(res.metrics["turn_center"])
-        assert _point_line_dist(center, lines[0]) < 0.05, "延长线未通过转弯圆心"
-        assert any("锁死轴轴线延长线" in t.get_text() for t in ax.texts)
+        for ln in lines:
+            assert _point_line_dist(center, ln) < 0.05, "延长线未通过转弯圆心"
+            # 线的轨迹端须止于圆心（不过冲）
+            ends = list(zip(ln.get_xdata(), ln.get_ydata()))
+            assert min(math.dist(e, center) for e in ends) < 0.05
+        # 图上不再出现"锁死轴"文字
+        assert not any("锁死轴" in t.get_text() for t in ax.texts)
     finally:
         matplotlib.pyplot.close(fig)
 
@@ -279,3 +286,29 @@ def test_mechanical_drawing_unchanged_no_axle_extension():
         assert not any("锁死轴" in t.get_text() for t in ax.texts)
     finally:
         matplotlib.pyplot.close(fig)
+
+
+@pytest.mark.parametrize("factory", [_hydraulic_arc_bundle, _right_angle_bundle])
+def test_band_annotation_does_not_overlap_vehicles(factory):
+    # 扫掠宽度标注线（含引出到文字的段落）不得与已画车辆轮廓重叠
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+    from app.rendering.sweep_view import _band_angle_avoiding
+
+    res = run_scene(factory())
+    m = res.metrics
+    r_i, r_o = float(m["R_i"]), float(m["R_o"])
+    center = tuple(m.get("turn_center") or (0.0, 0.0))
+    turn_deg = float(m.get("turn_deg") or 140.0)
+    ang = _band_angle_avoiding(res.vehicle_frames, center, r_i, r_o, turn_deg)
+    ar = math.radians(ang)
+    seg = LineString([(center[0] + (r_i - 0.5) * math.cos(ar),
+                       center[1] + (r_i - 0.5) * math.sin(ar)),
+                      (center[0] + (r_o + 3.0) * math.cos(ar),
+                       center[1] + (r_o + 3.0) * math.sin(ar))])
+    veh = unary_union([g for f in res.vehicle_frames
+                       for g in (f[2], f[4]) if g is not None and not g.is_empty])
+    assert not seg.intersects(veh), f"标注线在 {ang}° 与车辆重叠"
+    assert 0.0 < ang < turn_deg, f"标注角应落在弯道范围内，实际 {ang}"
