@@ -187,10 +187,17 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
         rows.append(("扫空空间最大宽度 W (m)", f"{m.get('W',0):.3f}"))
         rows.append(("车货总宽度 B_t (m)", f"{m.get('B_t',0):.3f}"))
         rows.append(("外摆值 ΔB (m)", f"{m.get('deltaB',0):.3f}"))
-        rows.append(("牵引车出口加宽 ΔW2 (m)", f"{m.get('tractor_swing_widening',0):.3f}"))
-        rows.append(("出口判定所需宽度 W+ΔW2 (m)", f"{m.get('exit_required_w',0):.3f}"))
-        rows.append(("右转判定（5.2.1-1/-2）", "满足" if m.get('right_ok') else "不满足"))
-        rows.append(("左转判定（5.2.1-3/-4，仅参考）", "满足" if m.get('left_ok') else "不满足"))
+        rows.append(("牵引车外摆加宽 ΔW2 (m)", f"{m.get('tractor_swing_widening',0):.3f}"))
+        rows.append(("所需宽度 req_w=max(B_t+ΔB, W+ΔW2) (m)", f"{m.get('required_w',0):.3f}"))
+        rows.append(("入口净宽 (m)", f"{m.get('entry_net_w',0):.3f}"))
+        rows.append(("出口净宽 (m)", f"{m.get('exit_net_w',0):.3f}"))
+        rows.append(("右转判定（入口与出口同时满足）",
+                     "满足" if m.get('right_ok') else
+                     ("不满足（%s）" % "、".join(
+                         [n for n, o in (("入口", m.get('entry_ok')),
+                                         ("出口", m.get('exit_ok'))) if not o]))))
+        rows.append(("左转判定（物理区与左转处同时满足，仅参考）",
+                     "满足" if m.get('left_ok') else "不满足"))
         rows.append(("所需最小出口转弯带 W2_min (m，参考)", f"{m.get('W2_min',0):.3f}"))
     rows.append(("车货总高 (m)", f"{m.get('total_height',0):.3f}"))
     rows.append(("垂直净空校验", "满足" if m.get('vert_clearance_ok') else "不满足"))

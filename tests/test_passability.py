@@ -473,24 +473,48 @@ def test_right_angle_hydraulic_uses_trailer_only():
 
 
 def test_right_angle_hydraulic_tractor_exit_widening():
-    # 液压车仅按板车计算 → 出口需叠加牵引车外摆加宽 ΔW₂ = 牵引车宽/2
+    # 液压车仅按板车计算 → 所需宽度叠加牵引车外摆加宽 ΔW₂ = 牵引车宽/2
     m = run_scene(_ra_bundle(hyd=True)).metrics
     assert m["tractor_swing_widening"] == pytest.approx(0.5 * 2.5, abs=1e-9)
-    assert m["exit_required_w"] == pytest.approx(
-        m["W"] + m["tractor_swing_widening"], abs=1e-9)
+    # ΔB = max(0, W−B_t) 时 B_t+ΔB = max(B_t, W) = W，故 req_w = W + ΔW₂
+    assert m["required_w"] == pytest.approx(
+        max(m["B_t"] + m["deltaB"], m["W"] + m["tractor_swing_widening"]), abs=1e-9)
     # 机械车包络已含牵引车 → 不叠加
     assert run_scene(_ra_bundle(hyd=False)).metrics[
         "tractor_swing_widening"] == 0.0
-    # 出口宽 7.0：单看 W 够用（6.000 ≥ 5.840），叠加 ΔW₂ 后不足 → 仅因牵引车加宽不通过
+    # 出口宽 7.0：叠加 ΔW₂ 后不足 → 不通过
     tight = _ra_bundle(hyd=True, exit_w=7.0)
     res = run_scene(tight)
     tm = res.metrics
-    avail = tm["exit_width"] - 2 * tm["sigma"]
-    assert avail >= tm["W"]
-    assert avail < tm["W"] + tm["tractor_swing_widening"]
+    assert tm["exit_net_w"] < tm["required_w"] and tm["entry_ok"]
     assert tm["split_vehicle_ok"] and tm["split_cargo_ok"]   # 非 5.2.4 引起
     assert res.pass_ok is False
     assert "ΔW<sub>2</sub>" in "\n".join(res.verdict_lines)
+
+
+def test_right_angle_requires_both_entry_and_exit():
+    # 直角弯的所需宽度必须**同时**小于入口与出口——只有出口够宽不算通过
+    wide = run_scene(_ra_bundle(hyd=True, entry=18.5, exit_w=14.0)).metrics
+    assert wide["entry_ok"] and wide["exit_ok"]
+
+    # 仅入口过窄：旧口径（入口只需 ≥ W）会判通过，现必须不通过
+    res_entry = run_scene(_ra_bundle(hyd=True, entry=7.0, exit_w=14.0))
+    em = res_entry.metrics
+    assert em["entry_ok"] is False and em["exit_ok"] is True
+    assert em["entry_net_w"] < em["required_w"]
+    assert res_entry.pass_ok is False
+
+    # 仅出口过窄
+    res_exit = run_scene(_ra_bundle(hyd=True, entry=18.5, exit_w=7.0))
+    xm = res_exit.metrics
+    assert xm["entry_ok"] is True and xm["exit_ok"] is False
+    assert res_exit.pass_ok is False
+
+    # 机械车 ΔW₂=0：req_w = W，入口/出口同样须同时满足
+    mm = run_scene(_ra_bundle(hyd=False, entry=18.5, exit_w=14.0)).metrics
+    assert mm["required_w"] == pytest.approx(mm["B_t"] + mm["deltaB"], abs=1e-9)
+    assert mm["required_w"] == pytest.approx(mm["W"], abs=1e-9)
+    assert mm["entry_ok"] and mm["exit_ok"]
 
 
 def test_b12_theta_min():

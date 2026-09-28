@@ -494,16 +494,16 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
             f"所需宽度 {band_w:.2f} "
             f"{'≤' if band_w <= road_w + 1e-6 else '>'} 道路宽度 {road_w:.2f}")
     elif "entry_width" in metrics:
-        d_w2 = float(metrics.get("tractor_swing_widening", 0.0) or 0.0)
+        # 直角弯：所需宽度须**同时**小于入口与出口（净宽 = 宽度 − 2σ）
+        req = float(metrics.get("required_w", metrics.get("W", 0.0)) or 0.0)
         info_lines.append(
-            f"入口 {metrics.get('entry_width', 0):.2f} / "
-            f"出口 {metrics.get('exit_width', 0):.2f}")
-        req = (f"扫空 W = {metrics.get('W', 0):.2f}"
-               # 图内用 ASCII "ΔW2"：Microsoft YaHei 无 U+2082(₂) 字形，
-               # 直接用下标字符会渲染成缺字方块
-               + (f" + 牵引车加宽 ΔW2 {d_w2:.2f} = "
-                  f"{metrics.get('exit_required_w', 0):.2f}" if d_w2 else ""))
-        info_lines.append(req)
+            f"所需宽度 {req:.2f} "
+            f"{'≤' if req <= float(metrics.get('entry_net_w', 0) or 0) + 1e-6 else '>'} "
+            f"入口净宽 {float(metrics.get('entry_net_w', 0) or 0):.2f}")
+        info_lines.append(
+            f"所需宽度 {req:.2f} "
+            f"{'≤' if req <= float(metrics.get('exit_net_w', 0) or 0) + 1e-6 else '>'} "
+            f"出口净宽 {float(metrics.get('exit_net_w', 0) or 0):.2f}")
     info = "\n".join(info_lines)
     ax.text(0.015, 0.97, info, transform=ax.transAxes, verticalalignment="top",
             horizontalalignment="left", fontsize=10.0, family="Microsoft YaHei",

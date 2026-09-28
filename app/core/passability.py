@@ -780,14 +780,24 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
     deltaW2 = (TRACTOR_SWING_EXIT_FACTOR * bundle.tractor.width
                if hydraulic else 0.0)
 
-    # 判定（5.2.1）：右转 5.2.1-1/-2 用进口道总宽/右转可通行宽；左转 5.2.1-3/-4
-    # 用平面交叉物理区可通行宽度 W_section 与左转处可通行宽度 W_lturn。
-    right_ok = ((entry_w - 2 * sigma) >= (B_t + deltaB) - _TOL) and \
-               ((exit_w - 2 * sigma) >= (W + deltaW2) - _TOL)
+    # 判定（5.2.1）——所需宽度须**同时**小于入口与出口（右转 5.2.1-1/-2、
+    # 左转 5.2.1-3/-4 各自的可通行宽度都要满足）：
+    #   所需宽度 req_w = max(B_t + ΔB, W + ΔW₂)
+    #   右转：入口净宽(entry−2σ) 与 出口净宽(exit−2σ) 都要 ≥ req_w
+    #   左转：W_section−σ 与 W_lturn−σ 都要 ≥ req_w
+    # 说明：ΔW₂（牵引车外摆加宽）不再只加在出口——牵引车在进口侧同样可能外摆，
+    # 故入口也按含 ΔW₂ 的所需宽度校核（较规范 5.2.1-1 的 B_r+ΔB 口径更保守）。
+    # 又因 ΔB = max(0, W − B_t) 时 B_t+ΔB = max(B_t, W)，而车体总宽 B_t 恒 ≤ 扫空
+    # 宽度 W，故 B_t+ΔB = W，req_w 实际等于 max(W, W+ΔW₂) = W + ΔW₂。
+    req_w = max(B_t + deltaB, W + deltaW2)
     W_section = ra.W_section if ra.W_section is not None else entry_w
     W_lturn = ra.W_lturn if ra.W_lturn is not None else exit_w
-    left_ok = ((W_section - sigma) >= (B_t + deltaB) - _TOL) and \
-              ((W_lturn - sigma) >= (W + deltaW2) - _TOL)
+    entry_ok = (entry_w - 2 * sigma) >= req_w - _TOL
+    exit_ok = (exit_w - 2 * sigma) >= req_w - _TOL
+    right_ok = entry_ok and exit_ok
+    section_ok = (W_section - sigma) >= req_w - _TOL
+    lturn_ok = (W_lturn - sigma) >= req_w - _TOL
+    left_ok = section_ok and lturn_ok
     pass_ok = right_ok
 
     # 5.2.4 超宽货物分体扫空校核（车辆扫空 / 货物扫空均不应超出路面范围）
@@ -795,18 +805,21 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
     pass_ok = pass_ok and split["vehicle_ok"] and split["cargo_ok"]
 
     # 现有“所需最小出口转弯带”保留为参考量（不再作为唯一判据）
-    w2_min = max(W + deltaW2, B_t + deltaB) + 2 * sigma
+    w2_min = req_w + 2 * sigma
 
     res.metrics = {
         "entry_width": entry_w, "exit_width": exit_w,
         "r_path": r_path, "R_o": r_o, "R_i": r_i, "W_needed": swept_w,
         "R_m": R_m, "W": W, "deltaB": deltaB, "W_en": entry_w,
         "W_turn": exit_w, "sigma": sigma, "B_t": B_t,
+        "required_w": req_w,
+        "entry_net_w": entry_w - 2 * sigma, "exit_net_w": exit_w - 2 * sigma,
+        "entry_ok": entry_ok, "exit_ok": exit_ok,
+        "section_ok": section_ok, "lturn_ok": lturn_ok,
         "W2_min": w2_min, "turn_deg": turn_deg,
         "turn_center": (0.0, 0.0),      # 绘图用：转弯圆心（与仿真一致）
         "hydraulic_trailer_only": hydraulic,
         "tractor_swing_widening": deltaW2,
-        "exit_required_w": W + deltaW2,
         "corner_radius": ra.corner_radius,
         "W_section": W_section, "W_lturn": W_lturn,
         "right_ok": right_ok, "left_ok": left_ok,
@@ -850,30 +863,32 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         f"外摆值 ΔB = max(W − B<sub>t</sub>, 0) = max({W:.3f} − {B_t:.3f}, 0) = {deltaB:.3f} m",
         f"横向预留空间 σ = {sigma:g} m",
         *((
-            f"牵引车出口加宽 ΔW<sub>2</sub> = {TRACTOR_SWING_EXIT_FACTOR:g} × 牵引车宽 = "
+            f"牵引车外摆加宽 ΔW<sub>2</sub> = {TRACTOR_SWING_EXIT_FACTOR:g} × 牵引车宽 = "
             f"{TRACTOR_SWING_EXIT_FACTOR:g} × {bundle.tractor.width:.2f} = {deltaW2:.3f} m"
-            "（参考文献《道路通过能力》第六章：牵引车外轮可能超出挂车轨迹线，"
-            "出口需在其基础上加宽；表6-1 简化为 d/2 − 0.16）",
+            "（参考文献《道路通过能力》第六章「牵引车对转弯的影响」：牵引车外轮可能超出"
+            "挂车轨迹线；表6-1 简化为 d/2 − 0.16。本系统按最不利计入，"
+            "进口与出口均按含 ΔW<sub>2</sub> 的所需宽度校核）",
         ) if hydraulic else ()),
-        "右转判定：",
+        "所需宽度 req_w = max(B<sub>t</sub> + ΔB, W"
+        + (" + ΔW<sub>2</sub>" if hydraulic else "")
+        + f") = max({B_t + deltaB:.3f}, {W + deltaW2:.3f}) = {req_w:.3f} m",
+        "右转判定（入口与出口须**同时**满足）：",
         _judge_line("W<sub>en</sub> − 2σ", entry_w - 2 * sigma,
-                    "B<sub>t</sub> + ΔB", B_t + deltaB,
-                    (entry_w - 2 * sigma) >= (B_t + deltaB) - _TOL),
+                    "req_w", req_w, entry_ok),
         _judge_line("W<sub>turn</sub> − 2σ", exit_w - 2 * sigma,
-                    ("W + ΔW<sub>2</sub>" if hydraulic else "W"), W + deltaW2,
-                    (exit_w - 2 * sigma) >= (W + deltaW2) - _TOL),
-        f"→ 右转结论：{'通过' if right_ok else '不通过'}",
-        "左转判定：",
+                    "req_w", req_w, exit_ok),
+        f"→ 右转结论：{'通过' if right_ok else '不通过'}"
+        + ("" if right_ok else
+           "（" + "、".join([n for n, o in (("入口不足", entry_ok),
+                                          ("出口不足", exit_ok)) if not o]) + "）"),
+        "左转判定（物理区与左转处须**同时**满足）：",
         _judge_line("W<sub>section</sub> − σ", W_section - sigma,
-                    "B<sub>t</sub> + ΔB", B_t + deltaB,
-                    (W_section - sigma) >= (B_t + deltaB) - _TOL),
+                    "req_w", req_w, section_ok),
         _judge_line("W<sub>lturn</sub> − σ", W_lturn - sigma,
-                    ("W + ΔW<sub>2</sub>" if hydraulic else "W"), W + deltaW2,
-                    (W_lturn - sigma) >= (W + deltaW2) - _TOL),
+                    "req_w", req_w, lturn_ok),
         f"→ 左转结论：{'通过' if left_ok else '不通过'}",
-        "所需最小出口转弯带 W<sub>2,min</sub> = max(W"
-        + (" + ΔW<sub>2</sub>" if hydraulic else "") + f", B<sub>t</sub> + ΔB) + 2σ = "
-        f"max({W + deltaW2:.3f}, {B_t + deltaB:.3f}) + 2×{sigma:g} = {w2_min:.3f} m（参考量）",
+        f"所需最小出口转弯带 W<sub>2,min</sub> = req_w + 2σ = "
+        f"{req_w:.3f} + 2×{sigma:g} = {w2_min:.3f} m（参考量）",
     ]
     if split["active"]:
         res.verdict_lines += [
