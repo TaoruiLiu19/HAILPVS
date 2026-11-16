@@ -179,12 +179,16 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
         _add_para(doc, "（扫掠轨迹图渲染失败，报告未附图；请检查图形依赖后重新导出。）",
                   12, bold=True)
 
-    # —— 五、检验结论 ——
+    # 与界面共用计算过程及分段标题。
     h5 = doc.add_heading("", level=1)
-    h5r = h5.add_run("五、检验结论")
+    h5r = h5.add_run("五、计算过程与检验结论")
     set_font_kai(h5r, 14, bold=True)
     for line in res.verdict_lines:
-        _add_formula_para(doc, line, 12)
+        if line.startswith("【") and line.endswith("】"):
+            section = doc.add_heading("", level=2)
+            set_font_kai(section.add_run(line[1:-1]), 12, bold=True)
+        else:
+            _add_formula_para(doc, line, 12)
     verdict = "通过" if res.pass_ok else "不通过"
     _add_para(doc, f"综合评定：该运输车辆（牵引车-挂车-货物）在该弯道工况下可通行性判定为【{verdict}】。", 12, bold=True)
 

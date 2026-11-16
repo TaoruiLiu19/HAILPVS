@@ -337,14 +337,14 @@ def _attach_common_checks(res: SweepScenarioResult, bundle: InputBundle,
     res.pass_ok = bool(res.pass_ok) and vert_ok and lat["ok"]
 
     lines = [
-        "垂直净空校验：",
+        "【垂直净空】",
         f"车货总高 H<sub>总</sub> = 车板高 + 货物高 = {bundle.trailer.deck_height:.3f} + "
         f"{bundle.cargo.height:.3f} = {total_h:.3f} m",
         f"净空间隙 gap = 净空 − H<sub>总</sub> = {bundle.road.vertical_clearance:.3f} − {total_h:.3f} "
         f"= {bundle.road.vertical_clearance - total_h:.3f} m",
         vmsg,
         f"大件运输尺寸分级：{size_grade}。",
-        "横向稳定性：",
+        "【横向稳定性】",
         *_lateral_formula_lines(r_inner_min, bundle, lat),
     ]
     return lines
@@ -476,13 +476,18 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
     # 表4.3.1 查表法（规范 3.1.2 / 4.3.1）
     size_grade = _grade.classify_bundle(bundle)
     lookup = _grade.arch_lookup_apply(size_grade, r_in, trans_w, swept_w)
-    lookup_note = {
-        "pass": (f"尺寸级 {size_grade}：圆曲线内缘半径 {r_in:.3f} m 与横向空间宽度 "
-                 f"{trans_w:.3f} m 均大于圆曲线可通行性表数值，查表法两项宽度判据满足。"),
-        "fail": (f"尺寸级 {size_grade}：圆曲线半径或横向空间宽度不大于查表阈值，"
-                 f"按验算法/仿真判定。"),
-        "fallback": (f"尺寸级 {size_grade}：该尺寸级无查表数据，按验算法/仿真判定。"),
-    }.get(lookup)
+    if lookup == "fallback":
+        lookup_note = f"尺寸级 {size_grade} 缺少对应查表数据，按验算法/仿真判定。"
+    else:
+        radius_limit = _grade.arch_lookup_min_radius(size_grade)
+        width_limit = _grade.arch_lookup_min_swept_width(size_grade)
+        lookup_note = (
+            f"尺寸级 {size_grade}，查表要求内半径 &gt; {radius_limit:.2f} m，"
+            f"横向空间宽度 &gt; {width_limit:.2f} m。"
+            f"本工况分别为 {r_in:.3f} m、{trans_w:.3f} m。"
+            f"软件同时校核扫空宽度 {swept_w:.3f} m 小于横向空间宽度。"
+            f"查表条件{'满足' if lookup == 'pass' else '不满足，按验算法/仿真判定'}。"
+        )
 
     # 判据③④（4.2.1 横向预留空间 σ）与查表法无关，两条路线都要校核
     outer_ok = clearance_outer >= sigma - _TOL
@@ -606,9 +611,11 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         track_source = "牵引车轮距为输入值" if bundle.tractor.track_width is not None else "牵引车轮距以车宽估算"
         axle_source = "牵引销至转动中心轴距离为输入值" if bundle.trailer.kingpin_to_axle is not None else "牵引销至转动中心轴距离以车板长度估算"
         channel_disp.extend([
-            f"稳态轮迹内侧半径 {wheel_radii[0]:.3f} m，外侧半径 {wheel_radii[1]:.3f} m，"
-            f"转弯通道宽度含 {TURN_SAFE_CLEARANCE:.2f} m 安全宽度。",
-            f"轮迹计算参数：{track_source}，{axle_source}。扫空空间宽度含横向预留 σ。",
+            f"W<sub>z</sub> = 外轮迹半径 − 内轮迹半径 + 安全宽度 "
+            f"= {wheel_radii[1]:.3f} − {wheel_radii[0]:.3f} + {TURN_SAFE_CLEARANCE:.2f} = {turn_channel_w:.3f} m",
+            f"W<sub>d</sub> = R<sub>o</sub> − R<sub>i</sub> + σ "
+            f"= {r_o:.3f} − {r_i:.3f} + {sigma:.3f} = {swept_w:.3f} m",
+            f"轮迹计算参数：{track_source}，{axle_source}。",
         ])
     if hydraulic:
         _env_len = max(bundle.trailer.length, bundle.cargo.length)
@@ -657,9 +664,10 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         f"道路外半径 R<sub>o</sub> = {r_out:.3f} m，内半径 R<sub>i</sub> = {r_in:.3f} m，"
         f"车道宽 {lane:.3f} m",
         f"横向预留空间 σ = {sigma:.3f} m；垂直净空 H<sub>净空</sub> = {road.vertical_clearance:.3f} m",
-        "【检验过程】",
+        "【轨迹与扫掠量测】",
         *geom_lines,
         *(_hydraulic_b12_lines(bundle, b12) if b12 is not None else ()),
+        "【宽度与横向净空】",
         *channel_disp,
         "路面宽度 / 横向空间宽度：",
         f"路面宽度 W<sub>road</sub> = 车道宽 + 硬路肩 = {lane:.3f} + {road.hard_shoulder_w:.3f} "
@@ -1056,7 +1064,7 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         f"平面交叉物理区可通行宽度 W<sub>section</sub> = {W_section:.2f} m；"
         f"左转处可通行宽度 W<sub>lturn</sub> = {W_lturn:.2f} m",
         f"横向预留空间 σ = {sigma:g} m；垂直净空 H<sub>净空</sub> = {road.vertical_clearance:.3f} m",
-        "【检验过程】",
+        "【轨迹与扫掠量测】",
         *swept_scope_lines,
         f"走行半径寻优：在 [{cands[0]:.2f}, {cands[-1]:.2f}] m 内比较 {len(cands)} 条"
         f"候选弧，选用 r = {r_path:.3f} m（最大单体越界面积 "
@@ -1069,6 +1077,7 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         f"车货总宽度 B<sub>t</sub> = max(挂车宽, 货宽) = max({bundle.trailer.width:.2f}, "
         f"{bundle.cargo.width:.2f}) = {B_t:.3f} m",
         f"外摆值 ΔB = max(W − B<sub>t</sub>, 0) = max({W:.3f} − {B_t:.3f}, 0) = {deltaB:.3f} m",
+        "【转向宽度校核】",
         f"横向预留空间 σ = {sigma:g} m",
         *((f"牵引车外摆加宽 ΔW<sub>2</sub> = {TRACTOR_SWING_EXIT_FACTOR:g} × 牵引车宽 = "
            f"{TRACTOR_SWING_EXIT_FACTOR:g} × {bundle.tractor.width:.2f} = {deltaW2:.3f} m"
@@ -1078,25 +1087,27 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         + (" + ΔW<sub>2</sub>" if deltaW2 > 0 else "")
         + f") = max({B_t + deltaB:.3f}, {W + deltaW2:.3f}) = {req_w:.3f} m",
         "右转宽度校核（入口与出口须同时满足）：",
-        _judge_line("W<sub>en</sub> − 2σ", entry_w - 2 * sigma,
+        _judge_line(f"W<sub>en</sub> − 2σ = {entry_w:.3f} − 2×{sigma:g}", entry_w - 2 * sigma,
                     "所需宽度", req_w, entry_ok),
-        _judge_line("W<sub>turn</sub> − 2σ", exit_w - 2 * sigma,
+        _judge_line(f"W<sub>turn</sub> − 2σ = {exit_w:.3f} − 2×{sigma:g}", exit_w - 2 * sigma,
                     "所需宽度", req_w, exit_ok),
         f"→ 右转宽度：{'满足' if right_ok else '不满足'}"
         + ("" if right_ok else
            "（" + "、".join([n for n, o in (("入口不足", entry_ok),
                                           ("出口不足", exit_ok)) if not o]) + "）"),
         "左转宽度校核（物理区与左转处须同时满足）：",
-        _judge_line("W<sub>section</sub> − σ", W_section - sigma,
+        _judge_line(f"W<sub>section</sub> − σ = {W_section:.3f} − {sigma:g}", W_section - sigma,
                     "所需宽度", req_w, section_ok),
-        _judge_line("W<sub>lturn</sub> − σ", W_lturn - sigma,
+        _judge_line(f"W<sub>lturn</sub> − σ = {W_lturn:.3f} − {sigma:g}", W_lturn - sigma,
                     "所需宽度", req_w, lturn_ok),
         f"→ 左转宽度：{'满足' if left_ok else '不满足'}",
         f"所需最小出口转弯带 W<sub>2,min</sub> = 所需宽度 + 2σ = "
         f"{req_w:.3f} + 2×{sigma:g} = {w2_min:.3f} m（参考量）",
     ]
     res.verdict_lines += [
-        "路口扫空校核（扫空区域不得超出平面交叉路面范围）：",
+        "【路口扫掠越界】",
+        "分别合并车辆、货物各自的相邻姿态扫掠区域。"
+        "越界面积 A = area(扫掠区域 ∖ 路面)，侵入深度取越界边界采样点到路面的最大距离。",
         f"车辆扫空空间超界面积 A<sub>veh</sub> = {split['vehicle_outside']:.3f} m²"
         f"（最大切入 {split['vehicle_depth']:.3f} m）"
         f" → {'合格' if split['vehicle_ok'] else '不合格'}",

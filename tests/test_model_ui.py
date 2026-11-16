@@ -29,6 +29,18 @@ def test_input_change_and_failed_render_cannot_reuse_old_result(monkeypatch):
         assert window.btn_export.isEnabled()
         assert window.btn_preview.isEnabled() and window.btn_save_img.isEnabled()
         assert window.metric_labels[0][1].text().endswith(" m")
+        assert window.pages.currentWidget() is window.graph_page
+        window.btn_process.click()
+        assert window.pages.currentWidget() is window.process_page
+        assert any(window.process_sections.item(row).text() == "宽度与横向净空"
+                   for row in range(window.process_sections.count()))
+        detail = window.text_result.toPlainText()
+        assert f"{original.metrics['W']:.3f} m" in detail
+        assert "= 7.500 − 4.200" in detail
+        window.action_show_acceptance()
+        assert window.pages.currentWidget() is window.methods_page
+        assert "JTG/T 2213—2023" in window.methods_document.toPlainText()
+        assert "计算方法说明.md" in window.methods_document.toMarkdown()
 
         window.edits["c_height"].setText("3.5")
         assert window.cur_result is None
@@ -48,6 +60,7 @@ def test_input_change_and_failed_render_cannot_reuse_old_result(monkeypatch):
         assert original.user_meta["c_height"] == "3.0"
         assert window._orig_pixmap is None
         assert window.btn_export.isEnabled() and not window.btn_save_img.isEnabled()
+        assert window.pages.currentWidget() is window.process_page
     finally:
         window.close()
         app.processEvents()

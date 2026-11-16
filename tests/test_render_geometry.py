@@ -118,6 +118,7 @@ def test_word_report_no_run_mixes_verdict_polarity():
     path = os.path.join(tempfile.mkdtemp(), "r.docx")
     assemble_and_save(res, path)
     doc = docx.Document(path)
+    assert any(p.style.name == "Heading 2" and p.text == "轨迹与扫掠量测" for p in doc.paragraphs)
 
     green_rgb = docx.shared.RGBColor(0x2f, 0x85, 0x5a)
     for p in doc.paragraphs:
