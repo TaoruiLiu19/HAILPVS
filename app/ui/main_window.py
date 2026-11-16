@@ -57,6 +57,7 @@ _TRAILER_FIELDS = [
     ("挂车轴数", "t_axle_count", "axle_count", True),
     ("挂车轴距(m)", "t_axle_spacing", "axle_spacing", True),
     ("轮距(m)", "t_track_width", "track_width", True),
+    ("牵引销至挂车转动中心轴距离(m，可留空)", "t_kingpin_to_axle", "kingpin_to_axle", False),
 ]
 # 仅液压轴线挂车显示的参数（选挂车类型=液压后整组可见）；标签不带“(液压)”后缀。
 # 连接方式/连接部分长度为纯绘图参数且当前渲染路径未使用，不再提供输入（模型默认 0/鹅颈）。
@@ -67,6 +68,7 @@ _TRACTOR_FIELDS = [
     ("牵引车轴距(m)", "tr_wheelbase", "wheelbase", True),
     ("最大转向角(°)", "tr_max_steering_angle_deg", "max_steering_angle_deg", True),
     ("牵引车宽度(m)", "tr_width", "width", True),
+    ("牵引车前轮轮距(m，可留空)", "tr_track_width", "track_width", False),
     ("鞍座至后轴距离(m)", "tr_fifth_wheel_pos", "fifth_wheel_pos", True),
 ]
 _ARC_FIELDS = [
@@ -81,6 +83,7 @@ _RIGHT_FIELDS = [
     ("左转处可通行宽 W_lturn(m,可留空)", "W_lturn", False),
     # 交角固定为 90°（直角弯道），不再提供输入
 ]
+_OPTIONAL_INPUTS = ("t_kingpin_to_axle", "tr_track_width", "superelevation", "combined_cg_height")
 
 
 def _esc_html(s: str) -> str:
@@ -107,7 +110,8 @@ class MainWindow(QMainWindow):
         for edits in (self.edits, self._arc_edits, self._right_edits):
             for edit in edits.values():
                 edit.textChanged.connect(self.action_clear_result)
-        for combo in (self.cmb_pad, self.cmb_trailer_type, self.cmb_road, self.cmb_grade):
+        for combo in (self.cmb_pad, self.cmb_trailer_type, self.cmb_road, self.cmb_grade,
+                      self.cmb_turn_direction):
             combo.currentTextChanged.connect(self.action_clear_result)
 
     # ================= 数据状态 =================
@@ -242,7 +246,7 @@ class MainWindow(QMainWindow):
         self.cmb_trailer_type = _new_combo(TRAILER_TYPES, TRAILER_TYPES[0] if TRAILER_TYPES else "")
         f_t.addRow(_row_label("挂车类型："), self.cmb_trailer_type)
         for label, key, field, numeric in _TRAILER_FIELDS:
-            ed = _new_edit("0.0")
+            ed = _new_edit("0.0" if numeric else "")
             self.edits[key] = ed
             f_t.addRow(_row_label(f"{label}："), ed)
         # 液压轴线挂车参数整组：仅选“液压轴线挂车”后可见（标签不带“(液压)”后缀）
@@ -263,7 +267,7 @@ class MainWindow(QMainWindow):
         # 3. 牵引车参数
         g_car, f_car = _make_form_group("3. 牵引车参数")
         for label, key, field, numeric in _TRACTOR_FIELDS:
-            ed = _new_edit("0.0")
+            ed = _new_edit("0.0" if numeric else "")
             self.edits[key] = ed
             f_car.addRow(_row_label(f"{label}："), ed)
         v.addWidget(g_car)
@@ -306,6 +310,8 @@ class MainWindow(QMainWindow):
 
         # 直角弯道
         self.g_right, f_right = _make_form_group("2. 直角弯道参数")
+        self.cmb_turn_direction = _new_combo(["右转", "左转"], "右转")
+        f_right.addRow(_row_label("实际转向："), self.cmb_turn_direction)
         self._right_edits = {}
         for name, key, numeric in _RIGHT_FIELDS:
             ed = _new_edit("0.0" if numeric else "")
@@ -320,6 +326,11 @@ class MainWindow(QMainWindow):
         ed = _new_edit("10.0")
         self.edits["max_speed_kmh"] = ed
         f_cond.addRow(_row_label("最高行驶速度(km/h)："), ed)
+        for label, key in (("弯道超高率(如 0.02，可留空)", "superelevation"),
+                           ("车货总体重心离地高(m，可留空)", "combined_cg_height")):
+            ed = _new_edit("")
+            self.edits[key] = ed
+            f_cond.addRow(_row_label(f"{label}："), ed)
         v.addWidget(g_cond)
 
         v.addStretch(1)
@@ -358,13 +369,10 @@ class MainWindow(QMainWindow):
     def _f_right(self, key):
         return float(self._right_edits[key].text())
 
-    def _f_right_opt(self, key):
-        """可选输入：留空/非数字 → None（回退到入口/出口宽度口径），填数则用于 5.2.1 左转校核。"""
-        txt = self._right_edits.get(key).text().strip()
-        try:
-            return None if txt == "" else float(txt)
-        except ValueError:
-            return None
+    @staticmethod
+    def _optional_number(edit):
+        text = edit.text().strip()
+        return float(text) if text else None
 
     def collect_bundle(self) -> InputBundle:
         cargo_w = self._f("c_width")
@@ -389,6 +397,7 @@ class MainWindow(QMainWindow):
             axle_count=int(self._f("t_axle_count")),
             axle_spacing=self._f("t_axle_spacing"),
             track_width=self._f("t_track_width"),
+            kingpin_to_axle=self._optional_number(self.edits["t_kingpin_to_axle"]),
             steering_type="全轮强制转向",
             axle_max_steering_angle_deg=self._f("t_axle_steer_deg"),
         )
@@ -396,15 +405,18 @@ class MainWindow(QMainWindow):
             wheelbase=self._f("tr_wheelbase"),
             max_steering_angle_deg=self._f("tr_max_steering_angle_deg"),
             width=self._f("tr_width"),
+            track_width=self._optional_number(self.edits["tr_track_width"]),
             fifth_wheel_pos=self._f("tr_fifth_wheel_pos"),
         )
         road_type = self.cmb_road.currentText()
         grade = self.cmb_grade.currentText()
+        superelevation = self._optional_number(self.edits["superelevation"])
         if road_type == "圆弧弯道":
             road = RoadParams(road_type=road_type,
                               arc=ArcCorner(outer_radius=self._f_arc("outer_radius"),
                                             lane_width=self._f_arc("lane_width")),
                               vertical_clearance=self._f("vertical_clearance"),
+                              superelevation=superelevation,
                               highway_grade=grade)
         else:
             road = RoadParams(road_type=road_type,
@@ -413,12 +425,15 @@ class MainWindow(QMainWindow):
                                   exit_width=self._f_right("exit_width"),
                                   corner_radius=self._f_right("corner_radius"),
                                   intersection_angle_deg=90.0,
-                                  W_section=self._f_right_opt("W_section"),
-                                  W_lturn=self._f_right_opt("W_lturn")),
+                                  turn_direction=self.cmb_turn_direction.currentText(),
+                                  W_section=self._optional_number(self._right_edits["W_section"]),
+                                  W_lturn=self._optional_number(self._right_edits["W_lturn"])),
                               vertical_clearance=self._f("vertical_clearance"),
+                              superelevation=superelevation,
                               highway_grade=grade)
         return InputBundle(cargo=cargo, trailer=trailer, tractor=tractor, road=road,
-                           max_speed_kmh=self._f("max_speed_kmh"))
+                           max_speed_kmh=self._f("max_speed_kmh"),
+                           combined_cg_height=self._optional_number(self.edits["combined_cg_height"]))
 
     def run_calc(self):
         self.action_clear_result()
@@ -486,6 +501,7 @@ class MainWindow(QMainWindow):
         d["pad"] = self.cmb_pad.currentText()
         d["trailer_type"] = self.cmb_trailer_type.currentText()
         d["road_type"] = self.cmb_road.currentText()
+        d["turn_direction"] = self.cmb_turn_direction.currentText()
         d["highway_grade"] = self.cmb_grade.currentText()
         d["vertical_clearance"] = self._f("vertical_clearance")
         for k, ed in self._arc_edits.items():
@@ -499,7 +515,11 @@ class MainWindow(QMainWindow):
         self.action_clear_result()
         for k, ed in self.edits.items():
             if k in d:
-                ed.setText(str(d[k]))
+                ed.setText("" if k in _OPTIONAL_INPUTS and d[k] is None else str(d[k]))
+            elif k in _OPTIONAL_INPUTS:
+                ed.clear()
+        direction = d.get("turn_direction")
+        self.cmb_turn_direction.setCurrentText("左转" if direction == "左转" else "右转")
         if "pad" in d:
             self.cmb_pad.setCurrentText(str(d["pad"]))
         if "trailer_type" in d:
@@ -513,12 +533,19 @@ class MainWindow(QMainWindow):
                 ed.setText(str(d["arc_" + k]))
         for k, ed in self._right_edits.items():
             if "right_" + k in d:
-                ed.setText(str(d["right_" + k]))
+                value = d["right_" + k]
+                ed.setText("" if value is None else str(value))
+            elif k in ("W_section", "W_lturn"):
+                ed.clear()
         self._sync_road_fields()
 
     def action_new(self):
-        for ed in self.edits.values():
-            ed.setText("0.0")
+        for key, ed in self.edits.items():
+            ed.setText("" if key in _OPTIONAL_INPUTS else "0.0")
+        self.edits["t_axle_steer_deg"].setText(str(HYDRAULIC_AXLE_DEFAULT_STEER_DEG))
+        self.cmb_turn_direction.setCurrentText("右转")
+        for key, edit in self._right_edits.items():
+            edit.setText("" if key in ("W_section", "W_lturn") else "0.0")
         self.cmb_road.setCurrentText(ROAD_TYPES[0])
         self._sync_road_fields()
         self.action_clear_result()

@@ -133,6 +133,8 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
     rows.append(("公路等级", m.get('highway_grade', '')))
     rows.append(("大件运输尺寸级", m.get('size_grade', '')))
     if res.scene == "arc":
+        rows.append(("宽度判定方法", m.get("method", "")))
+        rows.append(("几何扫掠宽度 (m)", f"{m.get('geometry_swept_w', 0):.3f}"))
         rows.append(("扫空空间宽度 (m)", f"{m.get('W_needed', 0):.3f}"))
         rows.append(("转弯通道宽度 (m)", f"{m.get('W', 0):.3f}"))
         rows.append(("路面宽度 (m)", f"{m.get('road_width', 0):.3f}"))
@@ -140,11 +142,20 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
         rows.append(("外缘净空 (m)", f"{m.get('clearance_outer', 0):.3f}"))
         rows.append(("内缘净空 (m)", f"{m.get('clearance_inner', 0):.3f}"))
     else:
+        direction = m.get("turn_direction", "右转")
+        rows.append(("检验转向", direction))
         rows.append(("最内侧转弯半径 R_m (m)", f"{m.get('R_m', 0):.3f}"))
         rows.append(("扫空空间宽度 W (m)", f"{m.get('W', 0):.3f}"))
         rows.append(("外摆值 ΔB (m)", f"{m.get('deltaB', 0):.3f}"))
-        rows.append(("入口净宽 (m)", f"{m.get('entry_net_w', 0):.3f}"))
-        rows.append(("出口净宽 (m)", f"{m.get('exit_net_w', 0):.3f}"))
+        widths = (("物理区净宽", "section_net_w"), ("左转处净宽", "lturn_net_w")) if direction == "左转" else (
+            ("入口净宽", "entry_net_w"), ("出口净宽", "exit_net_w"))
+        rows.extend((f"{label} (m)", f"{m.get(key, 0):.3f}") for label, key in widths)
+        for label, key in (("车辆", "vehicle"), ("货物", "cargo")):
+            if not m.get("split_error"):
+                rows.append((f"{label}越界面积 / 最大侵入", f"{m.get(f'{key}_outside', 0):.3f} m² / "
+                             f"{m.get(f'{key}_depth', 0):.3f} m"))
+        if m.get("split_error"):
+            rows.append(("扫掠校核", str(m["split_error"])))
     rows.append(("车货总高 (m)", f"{m.get('total_height', 0):.3f}"))
     rows.append(("垂直净空", "满足" if m.get('vert_clearance_ok') else "不满足"))
     rows.append(("横向稳定性", "满足" if m.get('ok') else "不满足"))
@@ -200,12 +211,16 @@ def _assemble_meta(res: SweepScenarioResult):
         ("挂车轴数", "t_axle_count"),
         ("挂车轴距(m)", "t_axle_spacing"),
         ("轮距(m)", "t_track_width"),
+        ("牵引销至挂车转动中心轴距离(m)", "t_kingpin_to_axle"),
         ("牵引车轴距(m)", "tr_wheelbase"),
+        ("牵引车前轮轮距(m)", "tr_track_width"),
         ("最大转向角(°)", "tr_max_steering_angle_deg"),
         ("最高行驶速度(km/h)", "max_speed_kmh"),
+        ("弯道超高率", "superelevation"),
+        ("车货总体重心离地高(m)", "combined_cg_height"),
     ]
     for name, key in mapping:
-        if key in meta:
+        if key in meta and meta[key] not in ("", None):
             params.append((name, meta[key]))
     if not params:
         params.append(("弯道类型", "圆弧弯道" if res.scene == "arc" else "直角弯道"))

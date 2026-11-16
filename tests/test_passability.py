@@ -628,6 +628,46 @@ def test_right_angle_swept_check_is_universal():
     assert "路口扫空" in "\n".join(res.verdict_lines)
 
 
+def test_right_angle_rejects_overrun_between_previously_drawn_poses():
+    bundle = _ra_bundle(hyd=False, entry=12, exit_w=12, cargo_width=3)
+    bundle.road.right_angle.corner_radius = 9.4
+    res = run_scene(bundle)
+    assert res.metrics["direction_width_ok"]
+    assert res.metrics["sweep_step"] <= 0.15 + 1e-9
+    assert 0 < res.metrics["vehicle_outside"] < res.metrics["sweep_area_tolerance"]
+    assert res.metrics["vehicle_depth"] > res.metrics["sweep_depth_tolerance"]
+    assert res.vehicle_overrun.area == pytest.approx(res.metrics["vehicle_outside"])
+    assert res.pass_ok is False
+
+
+def test_selected_left_turn_combines_left_width_and_swept_geometry():
+    bundle = _ra_bundle(entry=18.5, exit_w=14.0)
+    corner = bundle.road.right_angle
+    corner.W_section, corner.W_lturn = 2.0, 2.0
+    assert run_scene(bundle).pass_ok
+    corner.turn_direction = "左转"
+    left = run_scene(bundle)
+    assert left.metrics["right_ok"]
+    assert left.metrics["direction_width_ok"] is False
+    assert left.metrics["split_vehicle_ok"] and left.metrics["split_cargo_ok"]
+    assert left.pass_ok is False
+    corner.W_section, corner.W_lturn = 18.5, 14.0
+    assert run_scene(bundle).pass_ok
+
+
+def test_mechanical_arc_measures_wheel_channel_separately_from_body_sweep():
+    bundle = _arc_bundle(outer=30.0, lane=9.8)
+    bundle.tractor.track_width = 2.0
+    bundle.trailer.kingpin_to_axle = 10.0
+    m = run_scene(bundle).metrics
+    r = m["R_path"]
+    wheel_inner = math.sqrt(r**2 + 1.0 - 10.0**2) - bundle.trailer.track_width / 2
+    wheel_outer = math.hypot(r + 1.0, bundle.tractor.wheelbase)
+    assert m["turn_channel_w"] == pytest.approx(wheel_outer - wheel_inner + 0.5)
+    assert m["geometry_swept_w"] == pytest.approx(m["R_o"] - m["R_i"])
+    assert m["W_swept"] == pytest.approx(m["geometry_swept_w"] + m["sigma"])
+
+
 def test_b12_theta_min():
     r = hydraulic_turn_radii(_h_bundle(_h_trailer()), turn_angle_theta=0.0)
     assert r["theta_deg"] == pytest.approx(MIN_TURN_ANGLE_DEG)
@@ -889,6 +929,20 @@ def test_m8_scene_lateral_runs():
     res = run_scene(_arc_bundle(lowbed=True, outer=30.0, lane=7.0))
     assert "Vhmax" in res.metrics
     assert isinstance(res.metrics["ok"], bool)
+
+
+def test_stability_uses_supplied_adverse_superelevation_and_combined_cg():
+    bundle = _arc_bundle(outer=30.0, lane=9.8)
+    bundle.road.superelevation = -0.05
+    bundle.combined_cg_height = 3.7
+    m = run_scene(bundle).metrics
+    assert m["cg_height"] == pytest.approx(3.7)
+    assert m["superelevation"] == pytest.approx(-0.05)
+    assert m["cg_height_estimated"] is False and m["superelevation_default"] is False
+    assert m["Vch"] == pytest.approx(side_slip_critical_v(m["R_i"], m["mu"], -0.05))
+    assert m["Vcv"] == pytest.approx(overturn_critical_v(m["R_i"], 2.9, 3.7, -0.05))
+    assert side_slip_critical_v(25, 0.3, -0.3) == 0.0
+    assert parking_superelevation_ok(2.9, 3.7, -0.5) is False
 
 
 # ---- P0-6: 垂直净空分场景阈值 ----

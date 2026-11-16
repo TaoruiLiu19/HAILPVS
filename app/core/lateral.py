@@ -19,7 +19,9 @@ from config import g as _G
 def side_slip_critical_v(r: float, mu: float, ih: float) -> float:
     """侧滑临界速度 Vch（km/h），B.2.2。r 为最内侧转弯半径(m)。"""
     denom = 1.0 - mu * ih
-    if denom <= 1e-9 or (mu + ih) <= 0.0:
+    if mu + ih <= 0.0:
+        return 0.0
+    if denom <= 1e-9:
         return float("inf")
     return 3.6 * math.sqrt(_G * r * (mu + ih) / denom)
 
@@ -27,9 +29,12 @@ def side_slip_critical_v(r: float, mu: float, ih: float) -> float:
 def overturn_critical_v(r: float, b: float, h: float, ih: float) -> float:
     """侧翻临界速度 Vcv（km/h），B.2.2。b 轮距、h 重心高度、i_h 超高。"""
     denom = 2.0 * h - b * ih
-    if denom <= 1e-9:
+    numerator = b + 2.0 * h * ih
+    if numerator <= 0.0:
         return 0.0
-    return math.sqrt(127.0 * r * (b + 2.0 * h * ih) / denom)
+    if denom <= 1e-9:
+        return float("inf")
+    return math.sqrt(127.0 * r * numerator / denom)
 
 
 def max_stable_v(r: float, mu: float, b: float, h: float, ih: float) -> float:
@@ -41,7 +46,7 @@ def parking_superelevation_ok(b: float, h: float, ih: float) -> bool:
     """B.2.3 停车横向稳定性：i_h < b/(2h)。"""
     if h <= 1e-9:
         return True
-    return ih < b / (2.0 * h)
+    return abs(ih) < b / (2.0 * h)
 
 
 def lateral_stability(
@@ -62,6 +67,6 @@ def lateral_stability(
     msg = (f"侧滑临界速度 Vch = {vch:.3f} km/h；侧翻临界速度 Vcv = {vcv:.3f} km/h；"
            f"最大稳定速度 Vhmax = {vh:.3f} km/h。")
     if not p_ok:
-        msg += " 停车超高不满足 B.2.3（i_h 需 < 轮距/(2×重心高)）。"
+        msg += " 停车超高不满足 B.2.3（|i_h| 需 < 轮距/(2×重心高)）。"
     caption = "横向稳定性：通过" if (v_kmh <= vh + 1e-9 and p_ok) else "横向稳定性：不通过"
     return pass_ok, vh, vch, vcv, p_ok, msg + " " + caption

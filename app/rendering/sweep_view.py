@@ -1,7 +1,7 @@
 """扫掠轨迹工程图绘制（CAD 线框风格）。
 
 对标参考工程图：
-  - 白底、纯线框、无填充、无网格；
+  - 白底线框，路口越界区域单独着色；
   - 道路边界 = 黑色粗实线（主结构）；
   - 车辆轮廓 = 蓝色中实线（构件）；
   - 扫掠包络与半径构造圆弧 = 蓝色细虚线（构造/测量几何）；
@@ -14,7 +14,9 @@ import math
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Arc
+from matplotlib.patches import Arc, Patch, PathPatch
+from matplotlib.path import Path
+from shapely.geometry.polygon import orient
 
 from config import PLOT_DPI
 from ..core.passability import SweepScenarioResult
@@ -31,6 +33,7 @@ TEXT_COLOR = "#0d47a1"        # 标注文字：与标注线同色（深蓝）
 SPINE_COLOR = "#b8c0c8"       # 坐标轴细线：浅灰
 AXLE_COLOR = "#7b3fe4"        # 液压车轴段/转向轮：紫色（区别于机械车黑色轮廓）
 CARGO_SWEPT_COLOR = "#2f9e44"  # 货物扫空曲线（R_sf/R_sa/r_s，货物外伸时）：绿色短划线，区别于车辆扫掠灰线
+OVERRUN_COLOR = "#c53030"
 
 # 构造弧(扫掠 R_o/R_i)相对道路边界的向内留隙(m)：避免半径弧贴近/压过内缘线
 _SWEPT_ARC_INSET = 0.5
@@ -49,6 +52,24 @@ def _iter_geometries(geom):
             yield list(poly.exterior.coords)
             for interior in poly.interiors:
                 yield list(interior.coords)
+
+
+def _draw_overrun(ax, geometry):
+    if geometry is None or geometry.is_empty:
+        return False
+    polygons = [geometry] if geometry.geom_type == "Polygon" else getattr(geometry, "geoms", ())
+    drawn = False
+    for polygon in polygons:
+        if polygon.geom_type != "Polygon":
+            continue
+        rings = list(_iter_geometries(orient(polygon)))
+        points = [point for ring in rings for point in ring]
+        codes = [code for ring in rings for code in
+                 [Path.MOVETO] + [Path.LINETO] * (len(ring) - 2) + [Path.CLOSEPOLY]]
+        ax.add_patch(PathPatch(Path(points, codes), facecolor=OVERRUN_COLOR,
+                               edgecolor=OVERRUN_COLOR, alpha=0.28, zorder=1))
+        drawn = True
+    return drawn
 
 
 def _extents(*geoms):
@@ -350,7 +371,7 @@ def _annotate_rect_dims(ax, geom, prefix, offset, color=DIM_COLOR, text_off=1.7,
     for idx, (e, tag) in enumerate(((len_e, "长"), (width_e, "宽"))):
         if width_e is len_e and idx == 1:
             continue                               # 正方形长宽同边，仅标一条
-        a, b, _ux, _uy, nx, ny, L, _mx, _my = e
+        a, b, ux, uy, nx, ny, L, _mx, _my = e
         oa = (a[0] + nx * offset, a[1] + ny * offset)
         ob = (b[0] + nx * offset, b[1] + ny * offset)
         ax.plot([a[0], oa[0]], [a[1], oa[1]], color=color, linewidth=0.6, zorder=3)
@@ -362,6 +383,7 @@ def _annotate_rect_dims(ax, geom, prefix, offset, color=DIM_COLOR, text_off=1.7,
         tx, ty = mx + nx * text_off, my + ny * text_off
         ax.text(tx, ty, f"{prefix}{tag} {L:.2f}", color=TEXT_COLOR, fontsize=8,
                 ha="center", va="center", family="Microsoft YaHei",
+                rotation=(math.degrees(math.atan2(uy, ux)) + 90) % 180 - 90,
                 bbox=dict(facecolor="white", edgecolor="none", pad=1.0), zorder=4)
 
 
@@ -400,7 +422,16 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
     ax.set_facecolor("white")
     scene = getattr(res, "scene", "arc")
     pass_ok = bool(res.pass_ok)
+    metrics = res.metrics
+    direction = metrics.get("turn_direction")
 
+    show_overrun = _draw_overrun(ax, res.vehicle_overrun)
+    show_overrun = _draw_overrun(ax, res.cargo_overrun) or show_overrun
+    worst_body = max(("vehicle", "cargo"), key=lambda body: metrics.get(f"{body}_depth", 0))
+    depth_point = metrics.get(f"{worst_body}_depth_point")
+    if depth_point is not None:
+        ax.plot(*depth_point, marker="o", markerfacecolor="none", markeredgecolor=OVERRUN_COLOR,
+                markersize=7, markeredgewidth=1.2, zorder=6)
     # Layer 1: 扫掠包络 —— 蓝色细虚线（构造/测量几何）
     if res.swept is not None:
         for ring in _iter_geometries(res.swept):
@@ -453,7 +484,6 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
                             text_off=1.9, rear_anchor=rear_anchor)
 
     # Layer 4: 转弯圆心红色十字 + 扫掠半径 / 道路曲线半径 标注（数字无单位，统一为 m）
-    metrics = res.metrics
     # 转弯圆心与仿真转角均由计算层给出，渲染层不再硬编码 (0,0)、也不再跨模块
     # 引用 passability 的私有常量（_TURN_DEG / _RA_TURN_DEG）
     _ctr = metrics.get("turn_center") or (0.0, 0.0)
@@ -526,7 +556,7 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
         if scene == "arc":
             # 标注即所画环带的几何宽度 R_o−R_i（不加括注）
             _annotate_band(ax, center, r_i, r_o, mid_ang,
-                           f"扫掠环带 R_o−R_i = {band_w:.2f}")
+                           f"几何扫掠宽度 R_o−R_i = {band_w:.2f} m")
         else:  # right_angle
             _annotate_band(ax, center, r_i, r_o, mid_ang,
                            f"扫掠宽度 W = {band_w:.2f}")
@@ -577,30 +607,46 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
     from matplotlib.lines import Line2D
     verdict = "通过" if pass_ok else "不通过"
     vc = "#2f855a" if pass_ok else "#c53030"
-    info_lines = [f"检验结论：{verdict}"]
+    info_lines = [f"检验结论：{verdict}" + (f"（{direction}）" if direction else "")]
     if scene == "arc":
-        # 只做"所需宽度 / 道路宽度"的直接对比（不提查表法/其它判据）。
-        # 所需宽度取图中所画扫掠环带的几何宽度 R_o−R_i；道路宽度取路面宽度
-        # （行车道+硬路肩）。内/外缘预留 σ 已由图中道路内/外缘与 R_o/R_i 的
-        # 半径标注直接读出，不再重复列出。
-        road_w = float(metrics.get("road_width", 0.0) or 0.0)
-        info_lines.append(
-            f"所需宽度 {band_w:.2f} "
-            f"{'≤' if band_w <= road_w + 1e-6 else '>'} 道路宽度 {road_w:.2f}")
+        info_lines.append(f"判定依据：{metrics.get('method', '验算法')}")
+        if metrics.get("lookup") == "pass":
+            info_lines.append("查表宽度条件：满足")
+        else:
+            for label, key, available, check in (
+                ("通道宽度", "turn_channel_w", "road_width", "turn_channel_ok"),
+                ("扫空宽度", "W_swept", "transverse_space_w", "swept_width_ok"),
+            ):
+                info_lines.append(f"{label} {metrics.get(key, 0):.2f} / {metrics.get(available, 0):.2f} m"
+                                  f"（{'满足' if metrics.get(check) else '不满足'}）")
+        info_lines.append(f"内缘 / 外缘净空 {metrics.get('clearance_inner', 0):.2f} / "
+                          f"{metrics.get('clearance_outer', 0):.2f} m，要求 ≥ {metrics.get('sigma', 0):.2f} m")
+        if not metrics.get("steering_ok", True):
+            info_lines.append("所需转角超过挂车限值")
+        if metrics.get("sim_unstable"):
+            info_lines.append("超出铰接尾随模型适用范围")
     elif "entry_width" in metrics:
-        # 直角弯：所需宽度须**同时**小于入口与出口（净宽 = 宽度 − 2σ）
-        req = float(metrics.get("required_w", metrics.get("W", 0.0)) or 0.0)
-        info_lines.append(
-            f"所需宽度 {req:.2f} "
-            f"{'≤' if req <= float(metrics.get('entry_net_w', 0) or 0) + 1e-6 else '>'} "
-            f"入口净宽 {float(metrics.get('entry_net_w', 0) or 0):.2f}")
-        info_lines.append(
-            f"所需宽度 {req:.2f} "
-            f"{'≤' if req <= float(metrics.get('exit_net_w', 0) or 0) + 1e-6 else '>'} "
-            f"出口净宽 {float(metrics.get('exit_net_w', 0) or 0):.2f}")
+        widths = (("物理区 / 左转处净宽", "section_net_w", "lturn_net_w") if direction == "左转"
+                  else ("入口 / 出口净宽", "entry_net_w", "exit_net_w"))
+        title, first, second = widths
+        info_lines.append(f"{title} {metrics[first]:.2f} / {metrics[second]:.2f} m，"
+                          f"要求 ≥ {metrics['required_w']:.2f} m")
+        if metrics.get("split_error"):
+            info_lines.append("扫掠越界校核未完成")
+        else:
+            for label, key in (("车辆", "vehicle"), ("货物", "cargo")):
+                info_lines.append(f"{label}越界 {metrics[f'{key}_outside']:.3f} m²，"
+                                  f"最大侵入 {metrics[f'{key}_depth']:.3f} m")
+    if metrics.get("vert_clearance_ok") is False:
+        info_lines.append("垂直净空不足")
+    if metrics.get("ok") is False:
+        info_lines.append("横向稳定性不满足")
     info = "\n".join(info_lines)
-    ax.text(0.015, 0.97, info, transform=ax.transAxes, verticalalignment="top",
-            horizontalalignment="left", fontsize=10.0, family="Microsoft YaHei",
+    x = 0.985 if direction == "右转" else 0.015
+    y = 0.97 if scene == "arc" else 0.03
+    ax.text(x, y, info, transform=ax.transAxes, verticalalignment="top" if scene == "arc" else "bottom",
+            horizontalalignment="right" if direction == "右转" else "left",
+            multialignment="left", fontsize=10.0, family="Microsoft YaHei",
             fontweight="bold", color=vc, linespacing=1.35,
             bbox=dict(facecolor="white", alpha=0.9, edgecolor=vc, linewidth=1.0,
                       boxstyle="round,pad=0.4"))
@@ -611,6 +657,11 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
                label="扫掠包络 - 整车全程占道范围"),
         Line2D([0], [0], color=SWEPT_ARC_COLOR, lw=1.0, label="扫掠曲线（R_o / R_i）"),
     ]
+    if show_overrun:
+        handles.append(Patch(facecolor=OVERRUN_COLOR, alpha=0.28, label="扫掠越界区域"))
+    if depth_point is not None:
+        handles.append(Line2D([0], [0], color=OVERRUN_COLOR, ls="none", marker="o",
+                              markerfacecolor="none", label="最大侵入位置"))
     # 仅列入本图实际绘制的图元（货物扫空曲线仅在货物外伸时绘制；
     # 道路曲线内/外缘半径、交角构造线仅圆弧弯道绘制）
     _cs = metrics.get("cargo_swept")
@@ -640,7 +691,7 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
                label="尺寸标注（扫掠宽度 W / 车·货长宽）"),
     ]
     from matplotlib.font_manager import FontProperties
-    ax.legend(handles=handles, loc="lower left", title="图　例",
+    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.085), ncol=3,
               framealpha=0.94, edgecolor="#444444", labelspacing=0.45,
               prop=dict(family="Microsoft YaHei", size=8),
               title_fontproperties=FontProperties(family="Microsoft YaHei", size=9))
@@ -650,6 +701,12 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
     ypad = max((maxy - miny) * 0.12, 2.0)
     ax.set_xlim(minx - xpad, maxx + xpad)
     ax.set_ylim(miny - ypad, maxy + ypad)
+    if direction == "右转":
+        # 仿真以左弯为标准坐标，右弯示意镜像显示，横轴刻度同步映射。
+        from matplotlib.ticker import FuncFormatter
+        pivot_x = metrics["corner_point"][0]
+        ax.invert_xaxis()
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f"{2 * pivot_x - x:g}"))
     ax.set_aspect("equal", "box")
     for spine in ax.spines.values():
         spine.set_color(SPINE_COLOR)

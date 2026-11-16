@@ -7,7 +7,6 @@
   挂车参考后点 = 鞍座 - L_loop·(cosψ, sinψ)。
 """
 from __future__ import annotations
-import itertools
 import math
 
 from config import (MIN_TURN_ANGLE_DEG, AXLE_STEER_ABS_LIMIT_DEG,
@@ -47,7 +46,7 @@ class TractorTrailerKinematics:
         self.wheelbase = tr.wheelbase
         self.max_delta = math.radians(tr.max_steering_angle_deg)
         self.fifth_wheel = tr.fifth_wheel_pos
-        self.loop_len = max(tl.length, 1e-6)
+        self.loop_len = max(tl.kingpin_to_axle or tl.length, 1e-6)
         self.env_w = max(tl.width, bundle.cargo.width)
         self.body_len = max(tl.length, bundle.cargo.length)
         self.x = 0.0
@@ -83,13 +82,16 @@ class TractorTrailerKinematics:
         kx, ky = self.kingpin()
         return math.atan2(ky - self.ty, kx - self.tx)
 
+    def deck_center(self, psi):
+        kx, ky = self.kingpin()
+        half_length = self.b.trailer.length / 2.0
+        return kx - half_length * math.cos(psi), ky - half_length * math.sin(psi)
+
     def footprint_poly(self, pts_out):
         """把整车(牵引车+挂车/货物)当前外轮廓矩形(4~8个顶点)追加进 pts_out。"""
-        kx, ky = self.kingpin()
-        px, py = self.trailer_tail()
         ps = self.psi()
-        _rect_into((kx + px) / 2, (ky + py) / 2, ps, self.body_len,
-                   self.env_w, pts_out)
+        cx, cy = self.deck_center(ps)
+        _rect_into(cx, cy, ps, self.body_len, self.env_w, pts_out)
         _rect_into(self.x, self.y, self.theta, self.wheelbase + 1.0,
                    self.b.tractor.width, pts_out)
 
@@ -125,22 +127,31 @@ class TractorTrailerKinematics:
 
 
 def run_profile(kin: TractorTrailerKinematics, profile, v=2.0, dt=0.05,
-                draw_step=1, max_steps=40000):
-    """按转向角时序推演(profile: [(count, delta_rad), ...])。
+                draw_step=1, max_steps=40000, include_boundaries=False):
+    """按转向角时序推演，每段可用 (count, delta_rad, dt) 指定自己的步长。
 
     返回 (frames, kin)。frames 为采样帧，每帧 (x,y,theta,tx,ty)。
     """
-    frames = []
+    def pose():
+        return kin.x, kin.y, kin.theta, kin.tx, kin.ty
+
+    frames = [pose()] if include_boundaries else []
     kin.v = v
     step = 0
-    for count, delta in profile:
-        for _ in itertools.repeat(None, count):
+    for count, delta, *phase_dt in profile:
+        step_dt = phase_dt[0] if phase_dt else dt
+        for i in range(count):
             if step >= max_steps:
+                if include_boundaries:
+                    raise ValueError("扫掠仿真超出最大步数，请核查车辆转角和走行半径。")
                 return frames, kin
-            kin.update_step(delta, dt)
-            if step % draw_step == 0:
-                frames.append((kin.x, kin.y, kin.theta, kin.tx, kin.ty))
+            kin.update_step(delta, step_dt)
             step += 1
+            if include_boundaries:
+                if step % draw_step == 0 or i == count - 1:
+                    frames.append(pose())
+            elif (step - 1) % draw_step == 0:
+                frames.append(pose())
     return frames, kin
 
 
@@ -173,10 +184,8 @@ def build_trajectory_geoms(kin: TractorTrailerKinematics, frames,
         k.tx, k.ty = tx0, ty0
         # 牵引车与挂车各成一个矩形，避免帧内自交
         from . import kinematics as _km
-        kx, ky = k.kingpin()
-        px, py = k.trailer_tail()
         ps = k.psi()
-        cx, cy = (kx + px) / 2, (ky + py) / 2
+        cx, cy = k.deck_center(ps)
         env_pts, tr_pts, cg_pts, tb_pts = [], [], [], []
         _km._rect_into(cx, cy, ps, k.body_len, k.env_w, env_pts)          # 挂车+货物合并
         _km._rect_into(cx, cy, ps, k.b.trailer.length, k.b.trailer.width,
@@ -456,7 +465,8 @@ def axle_steering_geoms(base_x, base_y, psi, trailer, rho,
 
 def hydraulic_arc_trajectory(bundle: InputBundle, b12, radius, turn_deg,
                              straight=6.0, dt=0.05, draw_step=8,
-                             center=(0.0, 0.0)):
+                             center=(0.0, 0.0), *, max_step=None,
+                             include_envelope=True, exit_straight=None):
     """液压轴线挂车专属刚性圆周轨迹（D5：行为区分可视化）。
 
     整车刚体绕转弯圆心 O 以 radius 为半径做匀速圆周运动（无铰接尾摆），
@@ -477,14 +487,19 @@ def hydraulic_arc_trajectory(bundle: InputBundle, b12, radius, turn_deg,
 
     frames = []
     # —— 出入弯前后各取一段直线，贴合机械车画法 ——
-    line_pts = 6
+    line_pts = math.ceil(straight / max_step) if max_step is not None else 5
     # 入弯直道：沿 -Y 驶向 (R, 0)，航向 +90°
     for j in range(line_pts):
-        y = -straight + straight * (j / (line_pts - 1))
+        y = -straight + straight * (j / line_pts)
         psi = math.radians(90.0)
         frames.append((R, y, psi, rho, (R, y)))
     # 圆弧段：φ: 0→turn_deg，中心 (R cosφ, R sinφ)，航向 90°+φ
     n = max(int(turn_deg / 3.0), 20)
+    if max_step is not None:
+        outer_r, _ = hydraulic_rigid_sweep_radii(bundle, R)
+        n = max(n, math.ceil(turn_rad * outer_r / max_step))
+        if n > 40000:
+            raise ValueError("扫掠仿真超出最大步数，请核查车辆转角和走行半径。")
     for k in range(n + 1):
         phi = turn_rad * k / n
         cx, cy = R * math.cos(phi), R * math.sin(phi)
@@ -493,9 +508,12 @@ def hydraulic_arc_trajectory(bundle: InputBundle, b12, radius, turn_deg,
     # 出弯直道：沿末端切向
     end_psi = math.radians(90.0) + turn_rad
     ex, ey = frames[-1][0], frames[-1][1]
-    for j in range(1, line_pts + 1):
-        px = ex + (straight * j / line_pts) * math.cos(end_psi)
-        py = ey + (straight * j / line_pts) * math.sin(end_psi)
+    exit_straight = straight if exit_straight is None else exit_straight
+    exit_pts = math.ceil(exit_straight / max_step) if max_step is not None else line_pts
+    for j in range(1, exit_pts + 1):
+        distance = exit_straight * j / exit_pts
+        px = ex + distance * math.cos(end_psi)
+        py = ey + distance * math.sin(end_psi)
         frames.append((px, py, end_psi, rho, (px, py)))
 
     vgeoms = []
@@ -511,7 +529,7 @@ def hydraulic_arc_trajectory(bundle: InputBundle, b12, radius, turn_deg,
                         "n_tires": _axle_tire_count(tl)}))
 
     from .swept_path import polylist_to_multipoly
-    swept = polylist_to_multipoly(vgeoms)
+    swept = polylist_to_multipoly(vgeoms) if include_envelope else None
     return vgeoms, swept
 
 

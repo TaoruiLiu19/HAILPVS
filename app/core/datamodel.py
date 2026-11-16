@@ -4,6 +4,8 @@
 所有字段带默认值，便于模型校验与缺省推断。
 """
 from __future__ import annotations
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -31,6 +33,8 @@ class TrailerParams(BaseModel):
     axle_count: int = Field(gt=0, description="轴数")
     axle_spacing: float = Field(1.5, gt=0, description="轴距(m)")
     track_width: float = Field(gt=0, description="轮距(m)")
+    kingpin_to_axle: float | None = Field(
+        None, gt=0, allow_inf_nan=False, description="牵引销至挂车转动中心轴距离(m)")
     front_overhang: float = Field(0.0, ge=0, description="前悬:铰接点→第一轴(m)")
     rear_overhang: float = Field(0.0, ge=0, description="后悬:最后一轴→车尾(m)")
     steering_type: str = "全轮强制转向"
@@ -59,6 +63,7 @@ class TractorParams(BaseModel):
     max_steering_angle_deg: float = Field(gt=0, le=90, description="最大转向角(°)")
     length: float = Field(8.0, gt=0, description="牵引车长度(m)，绘图用")
     width: float = Field(gt=0, description="牵引车宽度(m)")
+    track_width: float | None = Field(None, gt=0, allow_inf_nan=False, description="牵引车前轮轮距(m)")
     height: float = Field(0.0, ge=0)
     fifth_wheel_pos: float = Field(0.0, description="鞍座/牵引销→后轴距离(m),负数在前悬外")
     drawbar_length: float = Field(0.0, ge=0, description="牵引杆长度(m)，全挂车用")
@@ -82,6 +87,7 @@ class RightAngleCorner(BaseModel):
     exit_width: float = Field(gt=0, description="出口宽(m)")
     corner_radius: float = Field(0.0, ge=0, description="弯道内半径(m)")
     intersection_angle_deg: float = Field(90.0, gt=0, lt=180)
+    turn_direction: Literal["右转", "左转"] = "右转"
     # 5.2.1 左转专用可通行宽度。缺省时回退到入口/出口宽度（界面未显式给定时）。
     W_section: float | None = Field(
         None, ge=0, description="左转时平面交叉物理区可通行宽度(m)，5.2.1-3")
@@ -98,6 +104,8 @@ class RoadParams(BaseModel):
     highway_grade: str = "三级公路"        # 4.2.1 确定横向预留空间 σ
     lateral_clearance: float | None = Field(
         None, ge=0, description="横向预留空间 σ(m)，显式给定则优先于按公路等级取值")
+    superelevation: float | None = Field(
+        None, gt=-1, lt=1, description="弯道超高率，向弯内倾斜为正；例如 0.02 表示 2%")
     # 4.2.2 / 4.3.1 横向空间宽度相关（替代“lane − 2σ”的错误口径）
     hard_shoulder_w: float = Field(0.0, ge=0, description="硬路肩宽度(m)")
     left_edgeline_w: float = Field(0.0, ge=0, description="左侧路缘带宽度(m)")
@@ -124,6 +132,8 @@ class InputBundle(BaseModel):
     tractor: TractorParams
     road: RoadParams
     max_speed_kmh: float = Field(10.0, gt=0, description="最高行驶速度(km/h)")
+    combined_cg_height: float | None = Field(
+        None, gt=0, allow_inf_nan=False, description="车货总体重心离地高度(m)")
     load_factor: float = Field(1.0, gt=0, description="横向载荷系数(离心)，默认1.0")
 
     @model_validator(mode="after")

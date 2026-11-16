@@ -44,3 +44,29 @@ def test_input_change_and_failed_render_cannot_reuse_old_result(monkeypatch):
     finally:
         window.close()
         app.processEvents()
+
+
+def test_turn_and_stability_inputs_survive_model_round_trip(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    window = main_window.MainWindow()
+    example = next(Path(__file__).resolve().parents[1].glob("示例4_*.model"))
+    old_model = load_model(example)
+    try:
+        window.unpack_model_data(old_model)
+        assert window.collect_bundle().road.right_angle.turn_direction == "右转"
+        window.cmb_turn_direction.setCurrentText("左转")
+        window.edits["superelevation"].setText("-0.04")
+        window.edits["combined_cg_height"].setText("3.5")
+        saved = window.pack_model_data()
+        window.action_new()
+        window.unpack_model_data(saved)
+        bundle = window.collect_bundle()
+        assert bundle.road.right_angle.turn_direction == "左转"
+        assert bundle.road.superelevation == pytest.approx(-0.04)
+        assert bundle.combined_cg_height == pytest.approx(3.5)
+        window.unpack_model_data(old_model)
+        assert window.collect_bundle().combined_cg_height is None
+    finally:
+        window.close()
+        app.processEvents()

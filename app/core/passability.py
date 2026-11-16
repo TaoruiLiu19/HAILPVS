@@ -11,6 +11,7 @@
 from __future__ import annotations
 import math
 
+from shapely.geometry import MultiPolygon
 from shapely.ops import unary_union
 
 from config import (TURN_SAFE_CLEARANCE, TURN_SAFE_CLEARANCE_B12,
@@ -21,7 +22,7 @@ from config import (TURN_SAFE_CLEARANCE, TURN_SAFE_CLEARANCE_B12,
                     VERT_SCENARIO,
                     TRACTOR_SWING_EXIT_FACTOR,
                     AXLE_STEER_ABS_LIMIT_DEG,
-                    SIM_DT, SIM_DRAW_STEP, SIM_TURN_SPEED)
+                    SIM_DT, SIM_TURN_SPEED)
 from .datamodel import InputBundle
 from .kinematics import (TractorTrailerKinematics, run_profile,
                          build_trajectory_geoms, hydraulic_turn_radii,
@@ -34,7 +35,7 @@ from . import lateral as _lateral
 # 仿真参数统一取自 config（单一真源，勿在此另行硬编码）
 _DT = SIM_DT           # 仿真时间步长 s
 _V = SIM_TURN_SPEED    # 仿真推进速度 m/s
-SAMPLES = SIM_DRAW_STEP  # 抽帧绘制步长
+_SWEEP_STEP = 2 * _DT * _V  # 扫掠几何采样间距(m)，绘图姿态另行挑选
 _TOL = 1e-6
 _STRAIGHT = 6.0        # 仿真入弯/出弯直道长度（m）：保持车辆近似绕原点转弯，与稳态判定一致
 _ROAD_STRAIGHT = 22.0  # 道路几何直道长度（m）：仅为绘图包住整车姿态，不影响仿真/判定
@@ -124,6 +125,8 @@ class SweepScenarioResult:
         self.scene = "arc"              # "arc" / "right_angle"
         self.road = None                # shapely 道路多边形
         self.swept = None               # shapely 扫掠区域
+        self.vehicle_overrun = None     # shapely 车辆扫掠越界区域
+        self.cargo_overrun = None       # shapely 货物扫掠越界区域
         self.vehicle_frames = []        # [(x,y,geom,trailer_geom,cargo_geom)] 抽帧车辆轮廓
         self.pass_ok = False
         self.metrics = {}               # 指标字典
@@ -149,6 +152,14 @@ def _is_hydraulic(bundle: InputBundle) -> bool:
 
 def _cargo_total_height(bundle: InputBundle) -> float:
     return bundle.trailer.deck_height + bundle.cargo.height
+
+
+def _departure_length(bundle):
+    body_length = max(bundle.trailer.length, bundle.cargo.length)
+    rear_reach = body_length / 2.0
+    if not _is_hydraulic(bundle):
+        rear_reach += bundle.trailer.length / 2.0 + abs(bundle.tractor.fifth_wheel_pos)
+    return max(_STRAIGHT, rear_reach + 2.0)
 
 
 def _vehicle_cargo_lines(bundle: InputBundle) -> list[str]:
@@ -251,14 +262,17 @@ def _lateral_check(bundle: InputBundle, r_min: float):
     cargo = bundle.cargo
     v = bundle.max_speed_kmh
     mu = PAD_FRICTION.get(cargo.cargo_bearing, 0.4)
-    cg_h = tl.deck_height + cargo.cg_height
-    ih = DEFAULT_SUPERELEVATION            # 超高按默认值计入横向稳定性(B.2)
+    cg_estimated = bundle.combined_cg_height is None
+    cg_h = tl.deck_height + cargo.cg_height if cg_estimated else bundle.combined_cg_height
+    ih_default = bundle.road.superelevation is None
+    ih = DEFAULT_SUPERELEVATION if ih_default else bundle.road.superelevation
     ok, vh, vch, vcv, p_ok, msg = _lateral.lateral_stability(
         r_min, v, tl.track_width, cg_h, ih, mu)
     return {
         "ok": ok, "Vhmax": vh, "Vch": vch, "Vcv": vcv,
         "parking_ok": p_ok, "msg": msg,
         "mu": mu, "cg_height": cg_h, "superelevation": ih,
+        "cg_height_estimated": cg_estimated, "superelevation_default": ih_default,
     }
 
 
@@ -273,7 +287,9 @@ def _lateral_formula_lines(r_min: float, bundle: InputBundle, lat: dict) -> list
     ok = lat["ok"]
     lines = [
         f"最内侧转弯半径 R = {r_min:.3f} m，轮距 b = {b:.2f} m，"
-        f"车货重心高 h = {h:.3f} m，超高 i<sub>h</sub> = {ih:.3f}，"
+        f"车货重心高 h = {h:.3f} m"
+        f"（{'车板高加货物重心高估算' if lat['cg_height_estimated'] else '输入值'}），"
+        f"超高 i<sub>h</sub> = {ih:.3f}（{'默认值' if lat['superelevation_default'] else '输入值'}），"
         f"横向力系数 μ = 衬垫摩擦系数（保守下限） = {mu:.2f}",
         f"侧滑临界速度 V<sub>ch</sub> = 3.6·√[g·R·(μ+i<sub>h</sub>)/(1−μ·i<sub>h</sub>)] "
         f"= 3.6·√[{g:.2f}·{r_min:.3f}·({mu:.3f}+{ih:.3f})/(1−{mu:.3f}·{ih:.3f})] "
@@ -286,8 +302,8 @@ def _lateral_formula_lines(r_min: float, bundle: InputBundle, lat: dict) -> list
         f"行驶速度 V = {v:.1f} km/h {'≤' if v <= vh + 1e-9 else '&gt;'} "
         f"V<sub>hmax</sub>({vh:.3f}) "
         f"→ 侧向 {'通过' if v <= vh + 1e-9 else '不通过'}",
-        f"停车超高：i<sub>h</sub>({ih:.3f}) "
-        f"{'&lt;' if ih < b / (2 * h) else '≥'} b/(2h) = {b / (2 * h):.3f} "
+        f"停车超高：|i<sub>h</sub>|({abs(ih):.3f}) "
+        f"{'&lt;' if lat['parking_ok'] else '≥'} b/(2h) = {b / (2 * h):.3f} "
         f"→ {'满足' if lat['parking_ok'] else '不满足'} 停车横向稳定性",
         f"横向稳定性总体：{'通过' if ok else '不通过'}",
         "注：此处 μ 取衬垫摩擦系数，作为横向力系数的保守下限。",
@@ -383,8 +399,8 @@ def _build_arc_display(bundle, r_path, delta_used):
     ang_vel = _V * math.tan(delta_used) / kin.wheelbase
     turn_steps = int(math.radians(_TURN_DEG) / (ang_vel * _DT))
     profile.append((turn_steps, delta_used))               # 绕 O 转 _TURN_DEG
-    profile.append((int(_STRAIGHT / (_V * _DT)), 0.0))     # 切向直道出场
-    frames, _k = run_profile(kin, profile, v=_V, dt=_DT, draw_step=SAMPLES)
+    profile.append((math.ceil(_departure_length(bundle) / (_V * _DT)), 0.0))
+    frames, _k = run_profile(kin, profile, v=_V, dt=_DT, draw_step=2, include_boundaries=True)
     vgeoms = build_trajectory_geoms(kin, frames, sample_rate=1)
     swept = polylist_to_multipoly(vgeoms)
     return vgeoms, swept
@@ -400,6 +416,7 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
     center = (0.0, 0.0)
     kin = TractorTrailerKinematics(bundle)
     hydraulic = _is_hydraulic(bundle)
+    sigma = _effective_sigma(bundle)
 
     # —— 沿道路中心线半径行驶；受最大转向角约束 → 实际路径半径 R_path ——
     r_target = r_in + lane / 2.0
@@ -412,6 +429,7 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
     r_veh = r_target if hydraulic else r_path
 
     b12 = None
+    wheel_radii = None
     trajectory_source = "铰接尾随"
     sim_unstable = False          # 铰接尾随模型是否超出适用前提（车板长 ≥ 走行半径）
     steering_ok = True
@@ -427,7 +445,8 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         turn_channel_w = b12["W_turn"]
         # 内/外缘预留（4.2.1）按"仅板车+货物"刚体扫空几何量测，不并入牵引车。
         r_o, r_i = hydraulic_rigid_sweep_radii(bundle, r_veh)
-        vgeoms, swept = hydraulic_arc_trajectory(bundle, b12, r_veh, _TURN_DEG)
+        vgeoms, swept = hydraulic_arc_trajectory(bundle, b12, r_veh, _TURN_DEG, max_step=_SWEEP_STEP,
+                                                  exit_straight=_departure_length(bundle))
     else:
         # —— 稳态量测（B.1.1 机械挂车：绕道路圆心 O 的铰接尾随仿真）——
         kin.reset_pose(r_path, 0.0, math.radians(90))
@@ -435,15 +454,20 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         ang_vel = _V * math.tan(delta_used) / kin.wheelbase
         rev_steps = int(4 * math.pi / (ang_vel * _DT))
         r_o, r_i = measure_steady_turn(kin, rev_steps, v=_V, dt=_DT, center=center)
-        swept_w = r_o - r_i
-        # B.1.1 机械挂车：仿真扫空宽度计入 0.5m 安全宽度；轨迹走铰接尾随
-        turn_channel_w = swept_w + TURN_SAFE_CLEARANCE
+        swept_w = r_o - r_i + sigma
+        # 以稳态同心轮迹估算 B.1.1 转弯通道。牵引销和挂车轴到圆心的半径
+        # 相差一条直角边（牵引销至挂车转动中心轴距离），轮迹再按轮距平移。
+        axle_radius = math.sqrt(max(0.0, r_path**2 + kin.fifth_wheel**2 - kin.loop_len**2))
+        tractor_track = bundle.tractor.track_width or bundle.tractor.width
+        wheel_inner = max(0.0, axle_radius - bundle.trailer.track_width / 2.0)
+        wheel_outer = math.hypot(r_path + tractor_track / 2.0, kin.wheelbase)
+        wheel_radii = wheel_inner, wheel_outer
+        turn_channel_w = wheel_outer - wheel_inner + TURN_SAFE_CLEARANCE
         vgeoms, swept = _build_arc_display(bundle, r_path, delta_used)
         # 铰接尾随模型的有效前提：车板长 < 走行半径。否则车尾会越过转弯圆心，
         # 尾随点绕圆心反向绕行，R_o/R_i 变成无物理意义的数值（该工况实际已不可能通过）。
         sim_unstable = r_path <= kin.loop_len
 
-    sigma = _effective_sigma(bundle)
     road_w = _transverse.road_width(road, lane)           # 路面宽度
     trans_w = _transverse.transverse_space_width(road, lane)  # 横向空间宽度（含加宽）
     clearance_outer = r_out - r_o
@@ -495,7 +519,8 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
     res.metrics["transverse_space_w"] = trans_w
 
     road_poly = _road_from_centerline(
-        r_target, (lane / 2.0, lane / 2.0, lane / 2.0), _TURN_DEG)
+        r_target, (lane / 2.0, lane / 2.0, lane / 2.0), _TURN_DEG,
+        straight=max(_ROAD_STRAIGHT, _departure_length(bundle) + _STRAIGHT))
     res.road = road_poly
     res.swept = swept
     # 圆弧弯道绘图姿态：入弯前直行 1 + 弯道内 2 + 完全出弯后直行 1 = 4 辆
@@ -515,6 +540,12 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         "clearance_outer": clearance_outer,
         "clearance_inner": clearance_inner,
         "turn_channel_w": turn_channel_w,
+        "geometry_swept_w": r_o - r_i,
+        "turn_channel_ok": width_ok,
+        "swept_width_ok": swept_ok,
+        "outer_clearance_ok": outer_ok,
+        "inner_clearance_ok": inner_ok,
+        "wheel_radii": wheel_radii,
         "trajectory_source": trajectory_source,
         "sim_unstable": sim_unstable,
         "steering_ok": steering_ok,
@@ -560,23 +591,25 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         res.metrics["B1_2_theta_source"] = b12["theta_source"]
         res.metrics["B1_2_turn_radius"] = b12["turn_radius"]
     res.pass_ok = pass_h
-    # —— 转弯通道/扫空展示行：液压按 4.3.1 两判据（B.1.2-1 轮迹 vs 路面宽度、
-    #      B.1.2-6 扫空 vs 横向空间宽度）；机械以扫空+0.5 作转弯通道 ——
-    if b12 is not None:
-        channel_disp = [
-            "转弯通道宽度判定：",
-            f"W<sub>z</sub> = {turn_channel_w:.3f} m ≤ 路面宽度 {road_w:.3f} m → "
-            f"{'满足' if width_ok else '不满足'}",
-            "扫空空间宽度判定：",
-            f"W<sub>d</sub> = {swept_w:.3f} m ≤ 横向空间宽度 {trans_w:.3f} m → "
-            f"{'满足' if swept_ok else '不满足'}",
-        ]
+    channel_disp = [
+        f"转弯通道宽度 W<sub>z</sub> = {turn_channel_w:.3f} m；"
+        f"扫空空间宽度 W<sub>d</sub> = {swept_w:.3f} m。",
+    ]
+    if lookup == "pass":
+        channel_disp.append("两项宽度判据由查表判定，计算宽度供参考。")
     else:
-        channel_disp = [
-            "转弯通道宽度（含 0.5 m 安全宽度）：",
-            f"W<sub>turn</sub> = 判定 W<sub>swept</sub> + {TURN_SAFE_CLEARANCE:g} "
-            f"= {swept_w:.3f} + {TURN_SAFE_CLEARANCE:.3f} = {turn_channel_w:.3f} m",
-        ]
+        channel_disp.extend([
+            _judge_line("路面宽度", road_w, "W<sub>z</sub>", turn_channel_w, width_ok),
+            _judge_line("横向空间宽度", trans_w, "W<sub>d</sub>", swept_w, swept_ok),
+        ])
+    if wheel_radii is not None:
+        track_source = "牵引车轮距为输入值" if bundle.tractor.track_width is not None else "牵引车轮距以车宽估算"
+        axle_source = "牵引销至转动中心轴距离为输入值" if bundle.trailer.kingpin_to_axle is not None else "牵引销至转动中心轴距离以车板长度估算"
+        channel_disp.extend([
+            f"稳态轮迹内侧半径 {wheel_radii[0]:.3f} m，外侧半径 {wheel_radii[1]:.3f} m，"
+            f"转弯通道宽度含 {TURN_SAFE_CLEARANCE:.2f} m 安全宽度。",
+            f"轮迹计算参数：{track_source}，{axle_source}。扫空空间宽度含横向预留 σ。",
+        ])
     if hydraulic:
         _env_len = max(bundle.trailer.length, bundle.cargo.length)
         _env_w = max(bundle.trailer.width, bundle.cargo.width)
@@ -657,48 +690,32 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
 # =====================================================================
 def _road_right_angle(corner_xy, entry_w, exit_w, turn_deg,
                       straight=_ROAD_STRAIGHT, corner_radius=0.0):
-    """直角弯道道路几何：两条正交直道带 + 内角导圆构成的 L 形。
-
-    corner_xy 为**路口角点**（两条直道行驶中心线的交点）坐标，与车辆实际走行
-    半径无关——道路是路口本身，车辆走行半径是驾驶员在路口内的选择（见
-    `_ra_radius_candidates`）。修复前把 corner_xy 当成车辆走行半径，导致
-    「路口越窄→走行半径越小→几何自相矛盾」，且窄路口反而因半径被抬高而判通过。
-    入口带 x ∈ [Px−eh, Px+eh] 自 −Y 方向进场；出口带 y ∈ [Py−xh, Py+xh] 向 −X
-    出场；内角以 corner_radius 圆顺。仅当 turn_deg ≈ 90° 时应用。
-    """
+    """两条相交直道的边界及内角导圆。道路与车辆走行半径独立。"""
     from shapely.geometry import Polygon as _Poly
 
-    px, py = float(corner_xy[0]), float(corner_xy[1])
-    if abs(turn_deg - 90.0) > 1e-6:
-        return _road_from_centerline(
-            px, (entry_w / 2.0, max(entry_w, exit_w) / 2.0, exit_w / 2.0),
-            turn_deg)
-
+    px, py = corner_xy
+    angle = math.radians(turn_deg)
+    sine, cosine = math.sin(angle), math.cos(angle)
     eh, xh = entry_w / 2.0, exit_w / 2.0
-    # 外缘右/上边界；入口/出口直道外延到满外矩形，使路口外角为干净直角。
-    rr, rt = px + eh, py + xh
-    b, l = py - straight, px - straight
-
-    pts = [(px - eh, b)]                          # 入口下角
+    inner_y = (eh * cosine - xh) / sine
+    exit_offset = (xh * cosine - eh) / sine
+    tangent = corner_radius * math.tan(angle / 2)
+    straight = max(straight, abs(inner_y) + tangent + 1, abs(exit_offset) + tangent + 1)
+    ex, ey = px - straight * sine, py + straight * cosine
+    pts = [(px - eh, py - straight)]
     if corner_radius > 1e-9:
-        # 左（内）角导圆：以内角顶点为基准，圆心落在其左下方、半径为
-        # corner_radius 的外凸圆弧，把尖角 "╮" 顺成融为一体的圆弧
-        # （圆心在左下、弧面朝路内侧，给车辆留转弯空间），杜绝此前用
-        # buffer() 生成游离整圆、与主体仅两点相切的错误形状。
-        vx, vy = px - eh, py - xh                 # 内角顶点
-        pts.append((vx, vy - corner_radius))      # 垂直直道内缘切点（内角下方）
-        cx, cy = vx - corner_radius, vy - corner_radius
-        n = 48
-        # 90° 弧自东侧切点逆时针铺到北侧切点：圆心在内角左下方、弧面朝
-        # 路内侧（外凸给车辆留转弯空间），是贴合两直道内缘的轻量圆角。
-        for i in range(1, n + 1):
-            ang = math.radians(90.0 * i / n)
+        cx, cy = px - eh - corner_radius, py + inner_y - tangent
+        # 角步长最多 1°，同时将导圆弦高控制在 1 mm 以内。
+        max_angle = min(math.radians(1), math.sqrt(0.008 / corner_radius))
+        n = max(1, math.ceil(angle / max_angle))
+        for i in range(n + 1):
+            ang = angle * i / n
             pts.append((cx + corner_radius * math.cos(ang),
                         cy + corner_radius * math.sin(ang)))
     else:
-        # 无导圆：保留内角尖角（一段水平 + 一段垂直）。
-        pts.append((px - eh, py - xh))
-    pts += [(l, py - xh), (l, rt), (rr, rt), (rr, b)]
+        pts.append((px - eh, py + inner_y))
+    pts += [(ex - cosine * xh, ey - sine * xh), (ex + cosine * xh, ey + sine * xh),
+            (px + eh, py - inner_y), (px + eh, py - straight)]
     return _Poly(pts)
 
 
@@ -731,7 +748,7 @@ def _ra_radius_candidates(bundle, entry_w, exit_w, corner_xy):
     return [r_lo + (r_hi - r_lo) * i / (n - 1) for i in range(n)]
 
 
-def _simulate_right_angle(bundle, entry_w, exit_w, turn_deg, r_path, corner_xy):
+def _simulate_right_angle(bundle, turn_deg, r_path, corner_xy, max_step):
     """按给定走行半径 r_path 生成直角弯扫掠帧（道路几何由调用方给定）。
 
     走行圆弧与两条直道中心线**相切**：圆心 = 角点 − (r, r)，自切点
@@ -744,82 +761,111 @@ def _simulate_right_angle(bundle, entry_w, exit_w, turn_deg, r_path, corner_xy):
       - 机械：铰接尾随仿真，包络**含牵引车**（B.1.1 条文说明：牵引车与挂车转动中心重合）。
     """
     kin = TractorTrailerKinematics(bundle)
-    cx, cy = corner_xy[0] - r_path, corner_xy[1] - r_path
+    turn_rad = math.radians(turn_deg)
+    cx, cy = _ra_turn_center(corner_xy, r_path, turn_deg)
+    exit_straight = _departure_length(bundle)
 
     if _is_hydraulic(bundle):
         b12 = hydraulic_turn_radii(bundle, actual_turn_radius=r_path)
-        return hydraulic_arc_trajectory(bundle, b12, r_path, turn_deg,
-                                        center=(cx, cy))
+        vgeoms, _ = hydraulic_arc_trajectory(
+            bundle, b12, r_path, turn_deg, center=(cx, cy), max_step=max_step,
+            include_envelope=False, exit_straight=exit_straight)
+        return vgeoms
 
     delta_rec = min(kin.max_delta, math.atan(kin.wheelbase / r_path))
-    r_real = kin.wheelbase / math.tan(delta_rec)
-    if abs(r_real - r_path) > 1e-9:            # 转向限位使实际半径变大 → 圆心随之平移
-        cx, cy = corner_xy[0] - r_real, corner_xy[1] - r_real
     kin.reset_pose(corner_xy[0], cy - _STRAIGHT, math.radians(90))
-    kin.delta = delta_rec
-
     ang_vel = abs(_V * math.tan(delta_rec) / kin.wheelbase)
+    max_dt = min(_DT, max_step / _V)
     profile = []
-    profile.append((int(_STRAIGHT / (_V * _DT)), 0.0))
-    turn_steps = int(math.radians(turn_deg) / (ang_vel * _DT))
-    profile.append((turn_steps, delta_rec))
-    profile.append((int(_STRAIGHT / (_V * _DT)), 0.0))
-    frames, _k = run_profile(kin, profile, v=_V, dt=_DT, draw_step=SAMPLES)
-    vgeoms = build_trajectory_geoms(kin, frames, sample_rate=1)
-    return vgeoms, polylist_to_multipoly(vgeoms)
+    for duration, delta in ((_STRAIGHT / _V, 0.0), (turn_rad / ang_vel, delta_rec),
+                            (exit_straight / _V, 0.0)):
+        count = math.ceil(duration / max_dt)
+        profile.append((count, delta, duration / count))
+    frames, _ = run_profile(kin, profile, v=_V, draw_step=max(1, round(max_step / (_V * max_dt))),
+                            include_boundaries=True)
+    return build_trajectory_geoms(kin, frames)
 
 
-def _ra_best_radius(bundle, entry_w, exit_w, turn_deg, road_poly, corner_xy,
-                    cands=None):
-    """在候选走行半径中选"能过就取最平缓、过不去就取切角最轻"的一条。
-
-    路口内可走的弧不止一条：贴内角走（小半径）切得浅但扫空带更宽；走大半径弧线
-    平缓，但弧线本身会压进内角空腔。故：
-      1) 若存在扫空不越界的半径，取其中**最大**者（驾驶员会选择最平缓的弧）；
-      2) 否则取越界面积最小者，并把该面积作为"最优走法仍切角多少"报出。
-    返回 (r, 越界面积, vgeoms, swept)。
-    """
-    cands = cands if cands is not None else _ra_radius_candidates(
-        bundle, entry_w, exit_w, corner_xy)
-    results = []
-    for r in cands:
-        vgeoms, swept = _simulate_right_angle(bundle, entry_w, exit_w, turn_deg,
-                                              r, corner_xy)
-        if swept is None:
-            continue
-        results.append((r, swept.difference(road_poly).area, vgeoms, swept))
-    if not results:                             # 全部候选都无有效几何（极端输入）
-        r = cands[0]
-        vgeoms, swept = _simulate_right_angle(bundle, entry_w, exit_w, turn_deg,
-                                              r, corner_xy)
-        return r, float("inf"), vgeoms, swept
-    feasible = [it for it in results if it[1] <= _SWEPT_OVERRUN_TOL]
-    if feasible:
-        return max(feasible, key=lambda it: it[0])
-    return min(results, key=lambda it: it[1])
+_SWEPT_OVERRUN_TOL = 0.10      # 工程数值容差面积(m²)
+_SWEPT_DEPTH_TOL = 0.02        # 同时限制局部侵入深度(m)
 
 
-_SWEPT_OVERRUN_TOL = 0.10      # 允许的越界面积(m²)：吸收多边形数值毛刺
+def _ra_sweep_radii(bundle, radius, center):
+    if _is_hydraulic(bundle):
+        return hydraulic_rigid_sweep_radii(bundle, radius)
+    kin = TractorTrailerKinematics(bundle)
+    delta = math.atan(kin.wheelbase / radius)
+    kin.reset_pose(center[0] + radius, center[1], math.pi / 2)
+    kin.delta = delta
+    steps = int(4 * math.pi * radius / (_V * _DT))
+    return measure_steady_turn(kin, steps, v=_V, dt=_DT, center=center)
+
+
+def _ra_turn_center(corner_xy, radius, turn_deg):
+    return corner_xy[0] - radius, corner_xy[1] - radius * math.tan(math.radians(turn_deg) / 2)
+
+
+def _ra_best_radius(bundle, turn_deg, road_poly, corner_xy, cands, width_limit, extra_width):
+    """优先选择满足扫掠容差的最大候选半径。临界工况对选定轨迹加密复核。"""
+    best = None
+    for radius in reversed(cands):
+        step = _SWEEP_STEP
+        frames = _simulate_right_angle(bundle, turn_deg, radius, corner_xy, step)
+        split = _swept_inside_road(frames, road_poly)
+        area = max(split["vehicle_outside"], split["cargo_outside"])
+        depth = max(split["vehicle_depth"], split["cargo_depth"])
+        if not split["error"] and area > 0 and (
+            area <= 2 * _SWEPT_OVERRUN_TOL and depth <= 2 * _SWEPT_DEPTH_TOL
+        ):
+            for _ in range(2):
+                previous = split
+                step /= 2
+                frames = _simulate_right_angle(bundle, turn_deg, radius, corner_xy, step)
+                split = _swept_inside_road(frames, road_poly)
+                area = max(split["vehicle_outside"], split["cargo_outside"])
+                if split["error"] or all(
+                    split[f"{body}_ok"] == previous[f"{body}_ok"]
+                    and abs(split[f"{body}_outside"] - previous[f"{body}_outside"]) <= 0.01
+                    and abs(split[f"{body}_depth"] - previous[f"{body}_depth"]) <= 0.005
+                    for body in ("vehicle", "cargo")
+                ):
+                    break
+            else:
+                split.update(vehicle_ok=False, cargo_ok=False, error="临界位置加密后未达到收敛要求")
+        result = radius, frames, split, step
+        if split["vehicle_ok"] and split["cargo_ok"]:
+            outer, inner = _ra_sweep_radii(
+                bundle, radius, _ra_turn_center(corner_xy, radius, turn_deg))
+            required = max(bundle.trailer.width, bundle.cargo.width, outer - inner + extra_width)
+            if required <= width_limit + _TOL:
+                return result
+            shortage = required - width_limit
+        else:
+            shortage = float("inf")
+        score = float("inf") if split["error"] else area, shortage
+        if best is None or score < best[0]:
+            best = score, result
+    return best[1]
 
 
 def _overrun_depth(poly, road):
-    """扫空越界区相对路面的最大切入深度(m)：用于区分"数值毛刺"与真实切角。"""
+    """在越界区域的边界顶点上量测最大侵入深度和所在位置。"""
     from shapely.geometry import Point
 
     if poly is None or poly.is_empty or road is None:
-        return 0.0
+        return 0.0, None
     rings = ([poly.exterior] if poly.geom_type == "Polygon"
-             else [g.exterior for g in getattr(poly, "geoms", [])])
-    depth = 0.0
+             else [g.exterior for g in getattr(poly, "geoms", []) if g.geom_type == "Polygon"])
+    depth, position = 0.0, None
     for ring in rings:
         for x, y in ring.coords:
             dist = Point(x, y).distance(road)
             if dist > depth:
-                depth = dist
-    return depth
+                depth, position = dist, (x, y)
+    return depth, position
 
 
-def _swept_inside_road(bundle: InputBundle, vgeoms, road_poly):
+def _swept_inside_road(vgeoms, road_poly):
     """5.2.4 扫空校核（**通用**）：车辆扫空 / 货物扫空不得超出路口路面范围。
 
     该校核不再由"货物是否超宽"启停（V1.4.x 的 `_overhang` 门禁会让普通工况
@@ -832,37 +878,49 @@ def _swept_inside_road(bundle: InputBundle, vgeoms, road_poly):
     写进结论文本便于排查。
     """
     out = {"active": True, "vehicle_swept_area": 0.0, "cargo_swept_area": 0.0,
+           "swept": None, "vehicle_overrun": None, "cargo_overrun": None,
            "vehicle_outside": 0.0, "cargo_outside": 0.0,
            "vehicle_depth": 0.0, "cargo_depth": 0.0,
+           "vehicle_depth_point": None, "cargo_depth_point": None,
            "vehicle_ok": False, "cargo_ok": False, "error": ""}
     if road_poly is None or not vgeoms:
         out["error"] = "缺少道路或轨迹几何"
         return out
     try:
-        veh_polys, cargo_polys = [], []
+        # 对每个刚体分别连接相邻姿态，填补两帧之间的空隙，避免跨车体取凸包。
+        bodies = [[], [], []]  # 车板、牵引车、货物
         for frame in vgeoms:
             # frame = (x,y,geom,trailer,cargo) 或液压追加 axle_geoms 的 6 元组；取前 5
             _, _, geom, trailer_geom, cargo_geom = frame[:5]
             # 机械车 geom = MultiPolygon([车板+货物包络, 牵引车])：车辆 = 车板 ∪ 牵引车；
             # 液压车 geom 为单 Polygon（车板+货物包络），车辆 = 车板。
-            parts = [trailer_geom]
-            if geom.geom_type == "MultiPolygon" and len(geom.geoms) >= 2:
-                parts.append(geom.geoms[-1])
-            veh_polys.append(unary_union(parts))
-            cargo_polys.append(cargo_geom)
-        veh_swept = unary_union(veh_polys)
-        cargo_swept = unary_union(cargo_polys)
+            bodies[0].append(trailer_geom)
+            if geom.geom_type == "MultiPolygon":
+                bodies[1].append(geom.geoms[-1])
+            bodies[2].append(cargo_geom)
+        for i, poses in enumerate(bodies):
+            if len(poses) > 1:
+                bodies[i] = [MultiPolygon((a, b)).convex_hull for a, b in zip(poses, poses[1:])]
+        veh_swept = unary_union(bodies[0] + bodies[1])
+        cargo_swept = unary_union(bodies[2])
         veh_over = veh_swept.difference(road_poly)
         cargo_over = cargo_swept.difference(road_poly)
+        veh_depth, veh_position = _overrun_depth(veh_over, road_poly)
+        cargo_depth, cargo_position = _overrun_depth(cargo_over, road_poly)
         out.update({
+            "swept": veh_swept.union(cargo_swept),
+            "vehicle_overrun": veh_over,
+            "cargo_overrun": cargo_over,
             "vehicle_swept_area": veh_swept.area,
             "cargo_swept_area": cargo_swept.area,
             "vehicle_outside": veh_over.area,
             "cargo_outside": cargo_over.area,
-            "vehicle_depth": _overrun_depth(veh_over, road_poly),
-            "cargo_depth": _overrun_depth(cargo_over, road_poly),
-            "vehicle_ok": veh_over.area <= _SWEPT_OVERRUN_TOL,
-            "cargo_ok": cargo_over.area <= _SWEPT_OVERRUN_TOL,
+            "vehicle_depth": veh_depth,
+            "cargo_depth": cargo_depth,
+            "vehicle_depth_point": veh_position,
+            "cargo_depth_point": cargo_position,
+            "vehicle_ok": veh_over.area <= _SWEPT_OVERRUN_TOL and veh_depth <= _SWEPT_DEPTH_TOL,
+            "cargo_ok": cargo_over.area <= _SWEPT_OVERRUN_TOL and cargo_depth <= _SWEPT_DEPTH_TOL,
         })
     except Exception as exc:                  # noqa: BLE001 —— 记录并判不合格
         out["error"] = f"{type(exc).__name__}: {exc}"
@@ -881,6 +939,13 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
     ra = road.right_angle
     entry_w, exit_w = ra.entry_width, ra.exit_width
     turn_deg = min(ra.intersection_angle_deg, 179.9)   # 默认 90°，两直道正交 + 内角导圆的 L 形
+    hydraulic = _is_hydraulic(bundle)
+    sigma = float(road.lateral_clearance if road.lateral_clearance is not None else INTERSECTION_RESERVE)
+    is_left = ra.turn_direction == "左转"
+    W_section = ra.W_section if ra.W_section is not None else entry_w
+    W_lturn = ra.W_lturn if ra.W_lturn is not None else exit_w
+    deltaW2 = TRACTOR_SWING_EXIT_FACTOR * bundle.tractor.width if hydraulic else 0.0
+    width_limit = min(W_section, W_lturn) - sigma if is_left else min(entry_w, exit_w) - 2 * sigma
 
     # —— 路口几何（与车辆走行半径无关）——
     # 角点尺度 P 只决定 L 形的大小与图上标注位置；入口/出口宽度、内角半径才是
@@ -889,33 +954,24 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
     cands = _ra_radius_candidates(bundle, entry_w, exit_w, corner_xy)
     # 直道外延须罩住"最平缓候选弧"的起转点与整车（r 大时起转点会退到路口之外）
     body_len = max(bundle.trailer.length, bundle.cargo.length, bundle.tractor.length)
-    tail = max(_ROAD_STRAIGHT, cands[-1] + _STRAIGHT + body_len + 3.0)
+    tangent_distance = cands[-1] * math.tan(math.radians(turn_deg) / 2)
+    tail = max(_ROAD_STRAIGHT, tangent_distance + max(_STRAIGHT + body_len, _departure_length(bundle)) + 3.0)
     road_poly = _road_right_angle(corner_xy, entry_w, exit_w, turn_deg,
                                   straight=tail, corner_radius=ra.corner_radius)
-    r_path, overrun_best, vgeoms, swept = _ra_best_radius(
-        bundle, entry_w, exit_w, turn_deg, road_poly, corner_xy, cands)
+    r_path, vgeoms, split, sweep_step = _ra_best_radius(
+        bundle, turn_deg, road_poly, corner_xy, cands, width_limit, deltaW2)
 
     # —— 在选定半径下量测扫掠带 ——
-    kin = TractorTrailerKinematics(bundle)
-    hydraulic = _is_hydraulic(bundle)
-    center = (corner_xy[0] - r_path, corner_xy[1] - r_path)
-    if hydraulic:
-        r_o, r_i = hydraulic_rigid_sweep_radii(bundle, r_path)
-    else:
-        delta_rec = min(kin.max_delta, math.atan(kin.wheelbase / r_path))
-        r_real = kin.wheelbase / math.tan(delta_rec)
-        center = (corner_xy[0] - r_real, corner_xy[1] - r_real)
-        kin.reset_pose(corner_xy[0], center[1], math.radians(90))
-        kin.delta = delta_rec
-        ang_vel = abs(_V * math.tan(delta_rec) / kin.wheelbase)
-        rev_steps = int(4 * math.pi / (ang_vel * _DT))
-        r_o, r_i = measure_steady_turn(kin, rev_steps, v=_V, dt=_DT, center=center)
+    center = _ra_turn_center(corner_xy, r_path, turn_deg)
+    r_o, r_i = _ra_sweep_radii(bundle, r_path, center)
     swept_w = max(r_o - r_i, 0.0)
 
     res = SweepScenarioResult()
     res.scene = "right_angle"
     res.road = road_poly
-    res.swept = swept
+    res.swept = split["swept"]
+    res.vehicle_overrun = split["vehicle_overrun"]
+    res.cargo_overrun = split["cargo_overrun"]
     res.vehicle_frames = _pick_poses(vgeoms)
 
     # == 5.2.1 三要素 ==
@@ -923,34 +979,20 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
     W = swept_w                            # 扫空空间最大宽度
     B_t = max(bundle.trailer.width, bundle.cargo.width)  # 车货总宽度
     deltaB = max(0.0, W - B_t)             # 外摆值 ΔB = Dmax − (R_m + B_t)
-    # 5.2.1-1 横向预留空间：平面交叉转弯固定取 INTERSECTION_RESERVE（默认 0.5），
-    # 非 4.2.1 按公路等级取值；显式给出 road.lateral_clearance 时按显式值。
-    if road.lateral_clearance is not None:
-        sigma = float(road.lateral_clearance)
-    else:
-        sigma = float(INTERSECTION_RESERVE)
     # 规范 5.2.1：式(5.2.1-1) 右端 = B_r + ΔB，式(5.2.1-2) 右端 = W；因
     # ΔB = max(0, W−B_t) 且车体总宽 B_t 恒 ≤ 扫空宽度 W，故 B_t+ΔB = W，两式
     # 等价于"W 须同时 ≤ 入口净宽与出口净宽"。
     # ΔW₂ 为**规范之外的附加保守余量**（默认 0.0＝严格按规范；>0 时报告标注），
     # 见 config.TRACTOR_SWING_EXIT_FACTOR 注释。
-    deltaW2 = (TRACTOR_SWING_EXIT_FACTOR * bundle.tractor.width
-               if hydraulic else 0.0)
-
     req_w = max(B_t + deltaB, W + deltaW2)
-    W_section = ra.W_section if ra.W_section is not None else entry_w
-    W_lturn = ra.W_lturn if ra.W_lturn is not None else exit_w
     entry_ok = (entry_w - 2 * sigma) >= req_w - _TOL
     exit_ok = (exit_w - 2 * sigma) >= req_w - _TOL
     right_ok = entry_ok and exit_ok
     section_ok = (W_section - sigma) >= req_w - _TOL
     lturn_ok = (W_lturn - sigma) >= req_w - _TOL
     left_ok = section_ok and lturn_ok
-    pass_ok = right_ok
-
-    # 5.2.4 路口扫空校核（**所有工况**，不再限于超宽货物）：扫空区域不得超出路面
-    split = _swept_inside_road(bundle, vgeoms, road_poly)
-    pass_ok = pass_ok and split["vehicle_ok"] and split["cargo_ok"]
+    direction_width_ok = left_ok if is_left else right_ok
+    pass_ok = direction_width_ok and split["vehicle_ok"] and split["cargo_ok"]
 
     # 现有“所需最小出口转弯带”保留为参考量（不再作为唯一判据）
     w2_min = req_w + 2 * sigma
@@ -961,13 +1003,19 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         "R_m": R_m, "W": W, "deltaB": deltaB, "W_en": entry_w,
         "W_turn": exit_w, "sigma": sigma, "B_t": B_t,
         "required_w": req_w,
+        "turn_direction": ra.turn_direction,
+        "direction_width_ok": direction_width_ok,
+        "section_net_w": W_section - sigma, "lturn_net_w": W_lturn - sigma,
         "entry_net_w": entry_w - 2 * sigma, "exit_net_w": exit_w - 2 * sigma,
         "entry_ok": entry_ok, "exit_ok": exit_ok,
         "section_ok": section_ok, "lturn_ok": lturn_ok,
         "W2_min": w2_min, "turn_deg": turn_deg,
         "turn_center": center,          # 绘图用：转弯圆心（与仿真一致）
         "corner_point": corner_xy,      # 绘图用：路口角点（两条中心线交点）
-        "overrun_best": overrun_best,   # 最优走行半径下的扫空越界面积
+        "overrun_best": max(split["vehicle_outside"], split["cargo_outside"]),
+        "sweep_step": sweep_step,
+        "sweep_area_tolerance": _SWEPT_OVERRUN_TOL,
+        "sweep_depth_tolerance": _SWEPT_DEPTH_TOL,
         "hydraulic_trailer_only": hydraulic,
         "tractor_swing_widening": deltaW2,
         "corner_radius": ra.corner_radius,
@@ -980,6 +1028,8 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         "cargo_outside": split["cargo_outside"],
         "vehicle_depth": split["vehicle_depth"],
         "cargo_depth": split["cargo_depth"],
+        "vehicle_depth_point": split["vehicle_depth_point"],
+        "cargo_depth_point": split["cargo_depth_point"],
         "split_vehicle_ok": split["vehicle_ok"],
         "split_cargo_ok": split["cargo_ok"],
         "split_error": split["error"],
@@ -1000,7 +1050,7 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
 
     res.verdict_lines = _vehicle_cargo_lines(bundle) + [
         "【弯道参数】",
-        f"弯道类型：直角弯道（平面交叉转弯）；公路等级：{road.highway_grade}",
+        f"弯道类型：平面交叉{ra.turn_direction}；公路等级：{road.highway_grade}",
         f"入口宽度 W<sub>en</sub> = {entry_w:.2f} m；出口宽度 W<sub>turn</sub> = {exit_w:.2f} m；"
         f"交角 {turn_deg:.0f}°；内角半径 r<sub>c</sub> = {ra.corner_radius:.2f} m",
         f"平面交叉物理区可通行宽度 W<sub>section</sub> = {W_section:.2f} m；"
@@ -1009,7 +1059,10 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         "【检验过程】",
         *swept_scope_lines,
         f"走行半径寻优：在 [{cands[0]:.2f}, {cands[-1]:.2f}] m 内比较 {len(cands)} 条"
-        f"候选弧，取扫空越界最小者 r = {r_path:.3f} m（越界 {overrun_best:.3f} m²）",
+        f"候选弧，选用 r = {r_path:.3f} m（最大单体越界面积 "
+        f"{res.metrics['overrun_best']:.3f} m²）",
+        f"扫掠采样间距上限 {sweep_step:.3f} m，工程数值容差："
+        f"越界面积 {_SWEPT_OVERRUN_TOL:.2f} m²、侵入深度 {_SWEPT_DEPTH_TOL:.2f} m。",
         f"扫掠外径 R<sub>max</sub> = R<sub>o</sub> = {r_o:.3f} m；扫掠内径 R<sub>i</sub> = {r_i:.3f} m",
         f"最内侧转弯半径 R<sub>m</sub> = R<sub>i</sub> = {R_m:.3f} m",
         f"扫空空间宽度 W = R<sub>o</sub> − R<sub>i</sub> = {r_o:.3f} − {r_i:.3f} = {W:.3f} m",
@@ -1024,21 +1077,21 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         "所需宽度 req_w = max(B<sub>t</sub> + ΔB, W"
         + (" + ΔW<sub>2</sub>" if deltaW2 > 0 else "")
         + f") = max({B_t + deltaB:.3f}, {W + deltaW2:.3f}) = {req_w:.3f} m",
-        "右转判定（入口与出口须同时满足）：",
+        "右转宽度校核（入口与出口须同时满足）：",
         _judge_line("W<sub>en</sub> − 2σ", entry_w - 2 * sigma,
                     "所需宽度", req_w, entry_ok),
         _judge_line("W<sub>turn</sub> − 2σ", exit_w - 2 * sigma,
                     "所需宽度", req_w, exit_ok),
-        f"→ 右转结论：{'通过' if right_ok else '不通过'}"
+        f"→ 右转宽度：{'满足' if right_ok else '不满足'}"
         + ("" if right_ok else
            "（" + "、".join([n for n, o in (("入口不足", entry_ok),
                                           ("出口不足", exit_ok)) if not o]) + "）"),
-        "左转判定（物理区与左转处须同时满足）：",
+        "左转宽度校核（物理区与左转处须同时满足）：",
         _judge_line("W<sub>section</sub> − σ", W_section - sigma,
                     "所需宽度", req_w, section_ok),
         _judge_line("W<sub>lturn</sub> − σ", W_lturn - sigma,
                     "所需宽度", req_w, lturn_ok),
-        f"→ 左转结论：{'通过' if left_ok else '不通过'}",
+        f"→ 左转宽度：{'满足' if left_ok else '不满足'}",
         f"所需最小出口转弯带 W<sub>2,min</sub> = 所需宽度 + 2σ = "
         f"{req_w:.3f} + 2×{sigma:g} = {w2_min:.3f} m（参考量）",
     ]
@@ -1050,7 +1103,8 @@ def run_right_angle_scene(bundle: InputBundle) -> SweepScenarioResult:
         f"货物扫空空间超界面积 A<sub>cargo</sub> = {split['cargo_outside']:.3f} m²"
         f"（最大切入 {split['cargo_depth']:.3f} m）"
         f" → {'合格' if split['cargo_ok'] else '不合格'}",
-        "(未录入护栏/路侧数据，货物按最不利情形的路面范围校核)",
+        "路口按输入尺寸构造两条相交道路。车辆和货物均按路面范围校核；"
+        "护栏、中央分隔带及路侧可用空间需按现场几何另行核对。",
     ]
     if split["error"]:
         res.verdict_lines.append(

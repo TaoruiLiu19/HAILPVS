@@ -186,7 +186,7 @@ def test_all_annotations_inside_view_limits(factory):
     res = run_scene(factory())
     fig, ax = build_figure(res)
     try:
-        x0, x1 = ax.get_xlim()
+        x0, x1 = sorted(ax.get_xlim())
         y0, y1 = ax.get_ylim()
         # 确有标注画在"道路 ∪ 扫掠"之外（尺寸线外移），否则本用例无意义
         bx0, bx1, by0, by1 = _extents(res.road, res.swept)
@@ -211,6 +211,44 @@ def test_view_metrics_come_from_result_not_hardcoded():
     assert ra["turn_center"] == pytest.approx((px - ra["r_path"], py - ra["r_path"]))
     assert ra["r_path"] > 0.0
     assert ra["turn_deg"] == pytest.approx(90.0)
+
+
+def test_arc_summary_shows_actual_lookup_instead_of_comparing_geometric_width():
+    import matplotlib.pyplot as plt
+    from app.rendering.sweep_view import build_figure
+
+    bundle = _hydraulic_arc_bundle()
+    bundle.road.arc.lane_width = 5.2
+    bundle.road.lateral_clearance = 0.0
+    bundle.trailer.axle_spacing = 7.5
+    result = run_scene(bundle)
+    assert result.metrics["lookup"] == "pass"
+    assert result.metrics["turn_channel_w"] > result.metrics["road_width"]
+    fig, ax = build_figure(result)
+    try:
+        summary = next(text.get_text() for text in ax.texts if "检验结论" in text.get_text())
+        assert "查表宽度条件：满足" in summary
+        assert "所需宽度" not in summary
+    finally:
+        plt.close(fig)
+
+
+def test_right_angle_plot_marks_the_checked_overrun():
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import PathPatch
+    from app.rendering.sweep_view import build_figure
+
+    bundle = _right_angle_bundle()
+    bundle.road.right_angle.entry_width = 2.5
+    result = run_scene(bundle)
+    assert result.vehicle_overrun.area > 0.1
+    fig, ax = build_figure(result)
+    try:
+        assert any(isinstance(patch, PathPatch) for patch in ax.patches)
+        assert any("车辆越界" in text.get_text() for text in ax.texts)
+        assert ax.xaxis_inverted()
+    finally:
+        plt.close(fig)
 
 
 @pytest.mark.parametrize("factory", [_failing_lookup_bundle,
