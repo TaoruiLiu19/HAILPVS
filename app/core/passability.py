@@ -175,26 +175,29 @@ def _hydraulic_b12_lines(bundle, b12) -> list[str]:
     lines = [
         "液压轴线挂车闭式解（定点转向模型）：",
         f"θ = {b12['theta_deg']:g}°",
-        f"首末轴距 d = L<sub>轮挂</sub>·({na}−1) = {L:g} × {na - 1} = {b12['d']:g} m",
-        f"车板总长 D<sub>总</sub> = {b12['D_total']:g} m；"
+        f"轴组跨度 s = L<sub>轮挂</sub>·({na}−1) = {L:g} × {na - 1} = {b12['d']:g} m；"
+        f"轮距 d = {b12['track']:g} m",
+        f"车货总宽 D<sub>总</sub> = max(挂车宽, 货宽) = {b12['D_total']:g} m；"
         f"动力机组长度 C = {b12['power_unit_len']:g} m",
-        f"瞬心偏距 base = d/(2·tanθ) = {b12['base']:g} m",
+        f"瞬心至内侧轮迹线偏距 base = s/(2·tanθ) = {b12['base']:g} m",
         f"扫空内缘半径 R<sub>min</sub> = base − (D<sub>总</sub>−d)/2 "
-        f"= {b12['base']:g} − ({b12['D_total']:g}−{b12['d']:g})/2 = {b12['R_in']:g} m",
+        f"= {b12['base']:g} − ({b12['D_total']:g}−{b12['track']:g})/2 = {b12['R_in']:g} m",
         f"扫空外缘半径 R<sub>max</sub> = √([base+(D<sub>总</sub>+d)/2]²+[L·N<sub>a</sub>/2+C]²) "
-        f"= {b12['R_out']:g} m",
+        f"= √([{b12['base']:g}+({b12['D_total']:g}+{b12['track']:g})/2]²"
+        f"+[{L:g}×{na}/2+{b12['power_unit_len']:g}]²) = {b12['R_out']:g} m",
         f"最大扫空宽度 W<sub>d</sub> = R<sub>max</sub> − R<sub>min</sub> + σ "
         f"= {b12['R_out']:g} − {b12['R_in']:g} + {TURN_SAFE_CLEARANCE_B12:g} "
         f"= {b12['W_swept']:g} m（σ={TURN_SAFE_CLEARANCE_B12:g}，安全宽度预留）",
-        f"轮迹半径：R<sub>内</sub> = {b12['R_vehicle_in']:g} m；"
+        f"轮迹半径：R<sub>内</sub> = base = {b12['R_vehicle_in']:g} m；"
         f"R<sub>外</sub> = √( [base+La]² + [L(N<sub>a</sub>−1)/2]² ) = "
-        f"{b12['R_vehicle_out']:g} m（La 取轮距 b = {b12['La']:g} m）",
+        f"{b12['R_vehicle_out']:g} m（La 取轮距 d = {b12['La']:g} m）",
         f"转弯通道宽度 W<sub>z</sub> = R<sub>外</sub>(轮迹) − R<sub>内</sub>(轮迹) + 0.5 "
         f"= {b12['R_vehicle_out']:g} − {b12['R_vehicle_in']:g} + 0.5 = {b12['W_turn']:g} m",
         f"判定量：扫空空间宽度 W<sub>d</sub> = {b12['W_swept']:g} m（判扫空无障碍）；"
         f"转弯通道宽度 W<sub>z</sub> = {b12['W_turn']:g} m（判转弯通道）",
-        "注：W<sub>d</sub> 为按挂车几何计算的特征宽度，与上文板车刚体扫空带 "
-        "R<sub>o</sub>−R<sub>i</sub>（用于内/外缘预留）定义不同。",
+        "注：W<sub>d</sub> 的纵向半长按规范取轴组跨度 L·N<sub>a</sub>/2（不计车板端部"
+        "悬伸），故略小于下文板车刚体扫空带 R<sub>o</sub>−R<sub>i</sub>；两者均已"
+        "以车货总宽定内外缘，量级一致。",
     ]
     for w_ in b12["warnings"]:
         lines.append(f"⚠ {w_}")
@@ -416,6 +419,7 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
 
     b12 = None
     trajectory_source = "铰接尾随"
+    sim_unstable = False          # 铰接尾随模型是否超出适用前提（车板长 ≥ 走行半径）
     if hydraulic:
         # —— 液压轴线挂车（B.1.2 闭式解口径）——
         # θ 由实际弯道半径反算(D9)：使瞬心偏距 base ≡ r_veh、R_min 恒为正，
@@ -439,6 +443,9 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         # B.1.1 机械挂车：仿真扫空宽度计入 0.5m 安全宽度；轨迹走铰接尾随
         turn_channel_w = swept_w + TURN_SAFE_CLEARANCE
         vgeoms, swept = _build_arc_display(bundle, r_path, delta_used)
+        # 铰接尾随模型的有效前提：车板长 < 走行半径。否则车尾会越过转弯圆心，
+        # 尾随点绕圆心反向绕行，R_o/R_i 变成无物理意义的数值（该工况实际已不可能通过）。
+        sim_unstable = r_path <= kin.loop_len
 
     sigma = _effective_sigma(bundle)
     road_w = _transverse.road_width(road, lane)           # 路面宽度
@@ -507,6 +514,7 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         "clearance_inner": clearance_inner,
         "turn_channel_w": turn_channel_w,
         "trajectory_source": trajectory_source,
+        "sim_unstable": sim_unstable,
     })
     # P2-问题7：货物外伸于挂车时增算货物前/后外侧扫空曲线（第六章公式）。
     # 映射（工程近似）：B=车货总宽、c1=货物横向间隙(同心取0)、L_f/L_a=货前/后外伸、
@@ -572,9 +580,9 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
             "板车走行半径（全轮强制转向、独立跟随道路中心线）：",
             f"道路中心线半径 R<sub>veh</sub> = 道路内半径 + 车道宽/2 "
             f"= {r_in:.3f} + {lane / 2:.3f} = {r_veh:.3f} m",
-            f"θ 按实际弯道半径反算：tanθ = d/(2R<sub>veh</sub>) = "
-            f"{b12['d']:g}/(2×{r_veh:.3f}) → θ = {b12['theta_deg']:g}°"
-            f"（不超过挂车轴结构最大转角 "
+            f"θ 按实际弯道半径反算：tanθ = s/(2·(R<sub>veh</sub>−d/2)) = "
+            f"{b12['d']:g}/(2×({r_veh:.3f}−{b12['track']:g}/2)) → θ = {b12['theta_deg']:g}°"
+            f"（s = 轴组跨度，d = 轮距；不超过挂车轴结构最大转角 "
             f"{bundle.trailer.axle_max_steering_angle_deg:g}°）",
             "板车刚体扫空量测（仅板车+货物，不含牵引车）：",
             f"车货外廓包络 = {_env_len:.3f} m（长）× {_env_w:.3f} m（宽）",
@@ -597,8 +605,14 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
             "稳态扫掠量测（绕道路圆心 O，附录C铰接仿真，供展示）：",
             f"扫掠外径 R<sub>o</sub> = {r_o:.3f} m；扫掠内径 R<sub>i</sub> = {r_i:.3f} m",
             f"仿真扫空宽度 W<sub>swept,仿真</sub> = R<sub>o</sub> − R<sub>i</sub> "
-            f"= {r_o:.3f} − {r_i:.3f} = {r_o - r_i:.3f} m",
+            f"= {r_o:.3f} − {r_i:.3f} = {r_o - r_i:.3f} m（取定常圆周段量测，"
+            "不含入弯过渡段）",
         ]
+        if sim_unstable:
+            geom_lines.append(
+                f"⚠ 车板长 {kin.loop_len:.2f} m ≥ 走行半径 {r_path:.2f} m：铰接尾随模型的"
+                "车尾已越过转弯圆心，R<sub>o</sub>/R<sub>i</sub> 仅作定性参考"
+                "（该工况物理上已不具备通过条件）。")
 
     res.verdict_lines = _vehicle_cargo_lines(bundle) + [
         "【弯道参数】",

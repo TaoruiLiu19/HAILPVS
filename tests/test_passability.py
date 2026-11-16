@@ -77,23 +77,23 @@ def _h_bundle(trailer, outer=30.0, lane=7.0):
 
 
 # ---- M1: 0.5m 安全宽度 ----
-def test_m1_safety_clearance_flips_judgement():
-    # 液压挂车 B.1.2：扫空宽度 Wd = Rmax−Rmin+σ（B.1.2-6，含安全宽度 σ=0.5）。
-    # θ 按实际弯道半径反算(D9)：tanθ=d/(2R_veh) → base ≡ R_veh = 27.4 m，
-    # 故 R_min = 27.4−(D总−d)/2 = 26.4（正，不再触发下限钳制）；
-    # R_max = √((R_veh+(D总+d)/2)² + (L·Na/2+C)²) = √(38.4²+7.5²) = 39.126。
-    # 窄车道时 Wd 超过横向空间宽度 → 判定不通过（低于宽车道场景）。
+def test_m1_safety_clearance_enters_width_criteria():
+    # 液压挂车 B.1.2：扫空宽度 Wd = Rmax−Rmin+σ（B.1.2-6），转弯通道宽度
+    # Wz = R外(轮迹)−R内(轮迹)+σ（B.1.2-1），二者都必须含 σ=0.5。
+    # 构造工况使"扣掉 0.5 m 后即可通过路面宽度判据"——证明这 0.5 m 是
+    # 决定宽度判据的余量（不是装饰项）。
     b = _arc_bundle(lowbed=False, outer=30.0, lane=5.2,
-                    lateral_clearance=0.0, axle_spacing=5.0)
+                    lateral_clearance=0.0, axle_spacing=7.5, axle_count=4)
     res = run_scene(b)
     m = res.metrics
+    A = TURN_SAFE_CLEARANCE_B12
     assert m["B1_2_Wd"] == pytest.approx(m["W_needed"])               # 扫空宽度 = 判定 Wd
-    assert m["B1_2_base"] == pytest.approx(27.4, abs=1e-9)            # D9: base ≡ 实际半径
-    assert m["B1_2_Rin"] == pytest.approx(26.4, abs=1e-9)             # 恒为正
+    assert m["W_needed"] == pytest.approx(
+        m["B1_2_Rout"] - m["B1_2_Rin"] + A)                           # B.1.2-6 含 σ
+    assert m["W"] == pytest.approx(
+        m["B1_2_R_vehicle_out"] - m["B1_2_R_vehicle_in"] + A)         # B.1.2-1 含 σ
+    assert m["W"] > m["road_width"] > m["W"] - A                      # 0.5 m 决定该判据
     assert m["B1_2_warnings"] == []                                  # 无 R_min 取负告警
-    assert m["W_needed"] == pytest.approx(13.2256, abs=2e-3)         # = Rmax−Rmin+σ
-    assert m["W_needed"] > m["transverse_space_w"]                    # 扫空 > 横向空间 → 不通过
-    assert res.pass_ok is False
 
 
 def test_m1_same_vehicle_passes_with_wider_lane():
@@ -105,17 +105,19 @@ def test_m1_same_vehicle_passes_with_wider_lane():
 
 # ---- D9/D10: θ 口径 / La / 仅板车刚体扫空（液压车口径整治）----
 def test_b12_theta_from_actual_turn_radius():
-    # D9: 给定实际弯道半径 → θ = atan(d/(2R))，瞬心偏距 base ≡ R
-    tl = _h_trailer(axle_count=4, axle_spacing=1.5)          # d = 4.5
+    # D9: 给定实际弯道（车板中心走行）半径 → θ = atan(s/(2·(R−d/2)))，
+    # base 为**内侧轮迹线**偏距，故 base = R − 轮距/2
+    tl = _h_trailer(axle_count=4, axle_spacing=1.5)          # s = 4.5，轮距 2.9
     r = hydraulic_turn_radii(_h_bundle(tl), actual_turn_radius=26.5)
     assert r["theta_source"] == "turn_radius"
     # 返回字典中 theta_deg 按 4 位小数取整，故此处容差取 1e-4
     assert r["theta_deg"] == pytest.approx(
-        math.degrees(math.atan(4.5 / (2 * 26.5))), abs=1e-4)
-    assert r["base"] == pytest.approx(26.5, abs=1e-9)        # base ≡ 实际走行半径
+        math.degrees(math.atan(4.5 / (2 * (26.5 - 1.45)))), abs=1e-4)
+    assert r["base"] == pytest.approx(26.5 - 2.9 / 2, abs=1e-9)   # base = R − d/2
     assert r["turn_radius"] == pytest.approx(26.5)
-    # 长车板(12m)相对轴组(4.5m)不再给出负内缘半径，也不再触发下限告警
-    assert r["R_in"] > 0
+    # 车货总宽 3.0、轮距 2.9 → 内缘 = base − (3.0−2.9)/2，与外缘一起构成
+    # "车体绕圆心刚体圆周"的初等几何（见函数文档的自洽性校验）
+    assert r["R_in"] == pytest.approx(26.5 - 3.0 / 2, abs=1e-9)
     assert r["warnings"] == []
 
 
@@ -143,15 +145,14 @@ def test_b12_la_is_track_width():
     b = _h_bundle(tl)
     r = hydraulic_turn_radii(b, actual_turn_radius=26.5)
     assert r["La"] == pytest.approx(2.9)
-    d_half = 1.5 * (4 - 1) / 2.0                             # l = d/2
+    d_half = 1.5 * (4 - 1) / 2.0                             # l = 轴组跨度/2
     assert r["R_vehicle_out"] == pytest.approx(
         math.hypot(r["base"] + 2.9, d_half))
     assert r["W_turn"] == pytest.approx(
         r["R_vehicle_out"] - r["R_vehicle_in"] + TURN_SAFE_CLEARANCE_B12)
     # 第六章 R_min = √((l/tanα_max + b)² + l²) + (B−b)/2 与 La=轮距时逐项一致
-    # （用精确 θ 而非返回字典中 4 位取整的 theta_deg）
-    theta_full = math.atan(1.5 * (4 - 1) / (2 * 26.5))
-    r6 = math.hypot(d_half / math.tan(theta_full) + 2.9, d_half) \
+    # （l/tanα_max + b 即 B.1.2-2 的 base + La；B−b 为车宽相对轮距的悬伸）
+    r6 = math.hypot(r["base"] + 2.9, d_half) \
         + (tl.width - tl.track_width) / 2.0
     assert r["R_vehicle_out"] == pytest.approx(
         r6 - (tl.width - tl.track_width) / 2.0, abs=1e-9)
@@ -213,11 +214,12 @@ def test_m3_explicit_sigma_overrides_grade():
 def test_lookup_pass_does_not_waive_lateral_clearance():
     # 查表法（4.3.1-1）只覆盖"转弯通道宽度/扫空空间宽度"两项**宽度**判据；
     # 4.2.1 的横向预留空间 σ 属路线层面的独立要求，查表命中也要校核。
-    # 该工况查表命中，但车货外廓已越出路面边缘（净空为负）→ 应判不通过。
-    res = run_scene(_arc_bundle(lowbed=True, outer=30.0, lane=7.0))
+    # 该工况查表命中，但车货外廓已越过路面内缘（内缘净空为负）→ 应判不通过。
+    # （15 m 板车在 R=30/7 m 的路面上，扫掠内径 R_i≈20.3 m 已切进内缘 23.0 m 内侧）
+    res = run_scene(_arc_bundle(lowbed=True, outer=30.0, lane=7.0, length=15.0))
     m = res.metrics
     assert m["lookup"] == "pass"
-    assert m["clearance_outer"] < 0 and m["clearance_inner"] < 0
+    assert m["clearance_inner"] < 0
     assert res.pass_ok is False
     assert "横向预留" in m["method"]
     assert "横向预留" in "\n".join(res.verdict_lines)
@@ -334,20 +336,25 @@ def test_m6_hydraulic_radius_grows_with_axles():
         r["R_vehicle_out"] - r["R_vehicle_in"] + TURN_SAFE_CLEARANCE_B12)
 
 
-def test_m6_hydraulic_Lwheel_is_axle_spacing_not_track():
-    # 规范 B.1.2-2/-4：R = L轮挂·(Na−1)/(2tanθ)，L轮挂 取纵向轴距。
-    # 轮距 track_width 变化不应影响转弯半径；轴距 axle_spacing 变化才应影响。
+def test_m6_base_independent_of_track():
+    # 规范 B.1.2-2：base = L轮挂·(Na−1)/(2tanθ) 只取纵向轴距与 θ，
+    # 与轮距无关；轮距只作为车体相对轮迹线的横向偏距 d/2 进入 B.1.2-4/-5。
     base = _arc_bundle(lowbed=False, axle_count=4, axle_spacing=1.5, track=2.9)
     r0 = hydraulic_turn_radii(base)
     wide = _arc_bundle(lowbed=False, axle_count=4, axle_spacing=1.5, track=5.0)
     r_wide = hydraulic_turn_radii(wide)
     long = _arc_bundle(lowbed=False, axle_count=4, axle_spacing=3.0, track=2.9)
     r_long = hydraulic_turn_radii(long)
-    # 轮距不影响（修复前会错误触发）
-    assert r_wide["R_in"] == pytest.approx(r0["R_in"], abs=1e-9)
-    assert r_wide["R_out"] == pytest.approx(r0["R_out"], abs=1e-9)
-    # 轴距影响：R_out 与扫空宽度 W_swept=d 随之增大
-    assert r_long["R_out"] > r0["R_out"]
+    # 轮距不改变 base / θ
+    assert r_wide["base"] == pytest.approx(r0["base"], abs=1e-9)
+    assert r_wide["theta_deg"] == pytest.approx(r0["theta_deg"], abs=1e-9)
+    # 轮距加大 → 车体相对轮迹线的悬伸变小 → 内缘半径上抬、外缘半径外扩
+    assert r_wide["R_in"] > r0["R_in"]
+    assert r_wide["R_out"] > r0["R_out"]
+    assert r_wide["W_swept"] == pytest.approx(
+        r_wide["R_out"] - r_wide["R_in"] + TURN_SAFE_CLEARANCE_B12)
+    # 轴距影响：轴组跨度增大 → base 与扫空宽度随之增大
+    assert r_long["base"] > r0["base"]
     assert r_long["W_swept"] > r0["W_swept"]
 
 
@@ -573,13 +580,18 @@ def test_b12_locked_ends_extrap():
     assert r["warnings"] and "锁死" in r["warnings"][0]
 
 
-def test_b12_D_total_coupling_independent():
-    # D3/D8: D_total=车板长；耦合连接字段不影响 D_total/R/W_swept
+def test_b12_D_total_is_total_width_and_coupling_independent():
+    # D3/D8: B.1.2 的 D总 为**车货总宽**（车板端部横向量取），不是车板长；
+    # 耦合/连接杆字段只影响绘图，不影响 D总/R/W_swept。
     tl0 = _h_trailer(length=12.0)
     tl1 = _h_trailer(length=12.0, coupling_type="连接杆", coupling_length=5.0)
     r0, r1 = hydraulic_turn_radii(_h_bundle(tl0)), hydraulic_turn_radii(_h_bundle(tl1))
     assert r1["D_total"] == pytest.approx(r0["D_total"])
-    assert r1["D_total"] == pytest.approx(12.0)
+    assert r1["D_total"] == pytest.approx(max(tl0.width, 3.0))   # 车货总宽
+    # 车板长（改为 20 m）不再改变 D总 与扫空宽度——纵向尺寸只经轴组跨度进公式
+    r2 = hydraulic_turn_radii(_h_bundle(_h_trailer(length=20.0)))
+    assert r2["D_total"] == pytest.approx(r0["D_total"])
+    assert r2["W_swept"] == pytest.approx(r0["W_swept"])
     for k in ("R_in", "R_out", "W_swept", "W_turn", "d"):
         assert r1[k] == pytest.approx(r0[k])
 
@@ -623,6 +635,69 @@ def test_b12_judgement_turn_channel_vs_road_width():
     assert res.metrics["B1_2_W_turn"] == pytest.approx(
         res.metrics["B1_2_R_vehicle_out"] - res.metrics["B1_2_R_vehicle_in"]
         + TURN_SAFE_CLEARANCE_B12)
+
+
+# ---- 物理合理性护栏（V1.5.0：防止"公式自洽但物理错"再次发生）----
+def test_hydraulic_swept_width_decreases_with_radius():
+    """扫空宽度必须随弯道半径增大单调减小，并在大半径时收敛到车宽量级。
+
+    旧口径把 B.1.2 的 D总 当成车板长，W_d 几乎与半径无关（R=16→15.87、
+    R=100→15.59），且大于车体对角线——该护栏用于锁死这类"量纲放错"的回归。
+    """
+    tl = _h_trailer(axle_count=6, axle_spacing=1.5, length=15.0, width=3.0)
+    b = _h_bundle(tl)
+    ws = [hydraulic_turn_radii(b, actual_turn_radius=R)["W_swept"]
+          for R in (12, 16, 20, 30, 50, 100)]
+    assert all(ws[i] > ws[i + 1] for i in range(len(ws) - 1))
+    assert ws[-1] < 2 * max(tl.width, 3.0)          # 大半径下趋近车宽
+    # 刚体扫空带同样单调，且两者量级一致（差异仅来自 B.1.2-5 的纵向半长口径）
+    bands = []
+    for R in (12, 16, 20, 30, 50, 100):
+        ro, ri = hydraulic_rigid_sweep_radii(b, R)
+        bands.append(ro - ri)
+    assert all(bands[i] > bands[i + 1] for i in range(len(bands) - 1))
+    for w, band in zip(ws, bands):
+        assert abs(w - band) < 1.5
+
+
+def test_hydraulic_swept_width_below_body_diagonal():
+    """单车刚体的扫空带宽度不可能超过车体对角线（旧口径 15.87 m > 15.30 m）。"""
+    for length, width, na in ((15.0, 3.0, 6), (20.0, 4.5, 8), (12.0, 3.0, 4)):
+        tl = _h_trailer(axle_count=na, axle_spacing=1.5,
+                        length=length, width=width)
+        diag = math.hypot(length, width)
+        for R in (10, 20, 40):
+            r = hydraulic_turn_radii(_h_bundle(tl), actual_turn_radius=R)
+            assert r["W_swept"] < diag, (length, width, R, r["W_swept"])
+
+
+def test_mechanical_steady_measurement_independent_of_entry_pose():
+    """机械车 R_o/R_i 不得取决于仿真起点（入弯直道长度）。
+
+    修复前 measure_steady_turn 把入场过渡段一起统计：起点后退 6 m，R_o 就从
+    27.68 涨到 31.3，扫空宽度随"从哪一点开始算"漂移。
+    """
+    from app.core.kinematics import TractorTrailerKinematics
+    from app.core.swept_path import measure_steady_turn
+    from config import SIM_DT, SIM_TURN_SPEED
+
+    b = _arc_bundle(lowbed=True, outer=24.0, lane=4.0, length=15.0)
+    out = []
+    for y0 in (0.0, -6.0, -12.0):
+        kin = TractorTrailerKinematics(b)
+        R = 22.0
+        delta = min(kin.max_delta, math.atan(kin.wheelbase / R))
+        r_path = kin.wheelbase / math.tan(delta)
+        kin.reset_pose(r_path, y0, math.radians(90))
+        kin.delta = delta
+        ang = SIM_TURN_SPEED * math.tan(delta) / kin.wheelbase
+        steps = int(4 * math.pi / (ang * SIM_DT))
+        # 起点后退 y0 时转动圆心随之平移到 (0, y0)
+        out.append(measure_steady_turn(kin, steps, v=SIM_TURN_SPEED, dt=SIM_DT,
+                                       center=(0.0, y0)))
+    for ro, ri in out[1:]:
+        assert ro == pytest.approx(out[0][0], abs=0.05)
+        assert ri == pytest.approx(out[0][1], abs=0.05)
 
 
 # ---- S2: 液压车瞬心轨迹 + 多轴转向绘制（D5）----
