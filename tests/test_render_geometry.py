@@ -206,7 +206,10 @@ def test_view_metrics_come_from_result_not_hardcoded():
     assert res.metrics["turn_center"] == (0.0, 0.0)
     assert res.metrics["turn_deg"] == pytest.approx(140.0)
     ra = run_scene(_right_angle_bundle()).metrics
-    assert ra["turn_center"] == (0.0, 0.0)
+    # 直角弯：圆心 = 路口角点 −(r, r)，半径由寻优确定（不再硬编码 (0,0)）
+    px, py = ra["corner_point"]
+    assert ra["turn_center"] == pytest.approx((px - ra["r_path"], py - ra["r_path"]))
+    assert ra["r_path"] > 0.0
     assert ra["turn_deg"] == pytest.approx(90.0)
 
 
@@ -327,6 +330,9 @@ def test_band_annotation_does_not_overlap_vehicles(factory):
     center = tuple(m.get("turn_center") or (0.0, 0.0))
     turn_deg = float(m.get("turn_deg") or 140.0)
     ang = _band_angle_avoiding(res.vehicle_frames, center, r_i, r_o, turn_deg)
+    if ang is None:
+        # 全角度都被车辆占住（窄路口 + 长车板）→ 渲染层不画该标注，由结论框给数
+        return
     ar = math.radians(ang)
     seg = LineString([(center[0] + (r_i - 0.5) * math.cos(ar),
                        center[1] + (r_i - 0.5) * math.sin(ar)),

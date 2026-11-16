@@ -265,7 +265,8 @@ def test_m4_right_angle_self_consistent():
     assert m["deltaB"] == pytest.approx(max(0.0, m["W"] - m["B_t"]), abs=1e-6)
     right_ok = ((m["entry_width"] - 2 * sigma) >= (m["B_t"] + m["deltaB"]) - 1e-6) \
         and ((m["exit_width"] - 2 * sigma) >= m["W"] - 1e-6)
-    assert res.pass_ok == right_ok
+    # 综合结论 = 5.2.1 宽度判据 且 路口扫空校核（V1.5.0 起对所有工况生效）
+    assert res.pass_ok == (right_ok and m["split_vehicle_ok"] and m["split_cargo_ok"])
     assert ("外摆值" in "\n".join(res.verdict_lines)) and ("ΔB" in "\n".join(res.verdict_lines))
 
 
@@ -505,6 +506,7 @@ def test_right_angle_spec_scope_and_optional_conservatism():
     assert m["tractor_swing_widening"] == 0.0
     assert m["required_w"] == pytest.approx(m["B_t"] + m["deltaB"], abs=1e-9)
     assert m["required_w"] == pytest.approx(m["W"], abs=1e-9)
+    # 走行半径经寻优（取可行弧中最平缓者）后 W≈5.8，出口净宽 6.0 刚好够
     assert m["exit_net_w"] >= m["required_w"] and m["entry_ok"] and m["exit_ok"]
     assert run_scene(_ra_bundle(hyd=True, entry=18.5, exit_w=7.0)).pass_ok is True
     # 机械车同样 ΔW₂ = 0（包络本就含牵引车）
@@ -534,7 +536,7 @@ def test_right_angle_requires_both_entry_and_exit():
     assert wide["entry_ok"] and wide["exit_ok"]
 
     # 仅入口过窄：req_w = W 也随之增大，入口净宽不够 → 不通过
-    res_entry = run_scene(_ra_bundle(hyd=True, entry=7.0, exit_w=14.0))
+    res_entry = run_scene(_ra_bundle(hyd=True, entry=5.0, exit_w=14.0))
     em = res_entry.metrics
     assert em["entry_ok"] is False and em["exit_ok"] is True
     assert em["entry_net_w"] < em["required_w"]
@@ -547,9 +549,50 @@ def test_right_angle_requires_both_entry_and_exit():
     assert res_exit.pass_ok is False
 
     # 机械车 ΔW₂=0：req_w = W，入口/出口同样须同时满足
+    # （机械车走行半径受"车板长 > 走行半径则尾随模型失效"约束，W 比液压车更宽）
     mm = run_scene(_ra_bundle(hyd=False, entry=18.5, exit_w=14.0)).metrics
     assert mm["required_w"] == pytest.approx(mm["W"], abs=1e-9)
-    assert mm["entry_ok"] and mm["exit_ok"]
+    assert (mm["entry_ok"] and mm["exit_ok"]) == (
+        mm["entry_net_w"] >= mm["required_w"] - 1e-6
+        and mm["exit_net_w"] >= mm["required_w"] - 1e-6)
+
+
+# ---- 直角弯：走行半径寻优 + 通用扫空校核（V1.5.0）----
+def test_right_angle_radius_is_optimized_not_magic():
+    """走行半径不再取 max(入口,出口,1.2×车板长,10) 的魔数，而是在路口内寻优：
+    存在不越界的半径时取**最平缓**者；否则取切角最轻者并判不通过。"""
+    res = run_scene(_ra_bundle(hyd=True, entry=18.5, exit_w=14.0))
+    m = res.metrics
+    # 18.5/14 + 12 m 板车：存在若干可行半径 → 取最大者，扫空不越界
+    assert m["vehicle_outside"] <= 0.10 and m["cargo_outside"] <= 0.10
+    assert m["overrun_best"] <= 0.10
+    assert m["r_path"] > 0.5 * max(18.5, 14.0)
+    # 圆心 = 路口角点 −(r, r)：弧与两条直道中心线相切
+    px, py = m["corner_point"]
+    assert m["turn_center"] == pytest.approx((px - m["r_path"], py - m["r_path"]))
+
+
+def test_right_angle_swept_check_is_universal():
+    """扫空越界校核对所有工况生效（不再只在"货物超宽"时触发）——
+    修复前普通工况跳过该校核，图上包络已画出路面、结论却写"通过"。"""
+    # 窄路口 + 长车板（机械挂车，铰接尾随）：无论怎么走都会切内角
+    b = InputBundle(
+        cargo=_cargo(),
+        trailer=_trailer(lowbed=True, length=15.0, axle_count=6),
+        tractor=_tractor(),
+        road=RoadParams(road_type="直角弯道",
+                        right_angle=RightAngleCorner(entry_width=7.0,
+                                                     exit_width=7.0,
+                                                     corner_radius=0.0),
+                        vertical_clearance=7.5, highway_grade="三级公路"),
+        max_speed_kmh=10.0)
+    res = run_scene(b)
+    m = res.metrics
+    assert m["split_active"] is True
+    assert m["vehicle_outside"] > 0.10
+    assert m["vehicle_depth"] > 0.10          # 真实切角，不是多边形毛刺
+    assert res.pass_ok is False
+    assert "路口扫空" in "\n".join(res.verdict_lines)
 
 
 def test_b12_theta_min():

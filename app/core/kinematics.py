@@ -452,13 +452,15 @@ def axle_steering_geoms(base_x, base_y, psi, trailer, rho,
 
 
 def hydraulic_arc_trajectory(bundle: InputBundle, b12, radius, turn_deg,
-                             straight=6.0, dt=0.05, draw_step=8):
+                             straight=6.0, dt=0.05, draw_step=8,
+                             center=(0.0, 0.0)):
     """液压轴线挂车专属刚性圆周轨迹（D5：行为区分可视化）。
 
     整车刚体绕转弯圆心 O 以 radius 为半径做匀速圆周运动（无铰接尾摆），
     产生比机械铰接尾随更紧密的扫掠；每帧同时计算各轴转向几何供绘制。
+    center 为转弯圆心（直角弯需按路口角点平移，圆弧弯为原点）。
 
-    返回 (frames, swept)。frames 元素为 6 元组：
+    返回 (vgeoms, swept)。vgeoms 元素为 6 元组：
       (x, y, geom, trailer_geom, cargo_geom, axle_geoms)
     axle_geoms = {"psi": ψ, "rho": rho, "axles": [(idx,cx,cy,δ°,半轮距,锁死),...]}
     机械车不调用本函数，仍走 build_trajectory_geoms 铰接尾随。
@@ -468,6 +470,7 @@ def hydraulic_arc_trajectory(bundle: InputBundle, b12, radius, turn_deg,
     rho = float(b12["sweep_center_dist"])          # D5 瞬心横向偏距≈base
     na = max(int(tl.axle_count), 2)
     turn_rad = math.radians(turn_deg)
+    ox, oy = float(center[0]), float(center[1])
 
     frames = []
     # —— 出入弯前后各取一段直线，贴合机械车画法 ——
@@ -494,6 +497,9 @@ def hydraulic_arc_trajectory(bundle: InputBundle, b12, radius, turn_deg,
 
     vgeoms = []
     for x, y, psi, rho_f, ctr in frames:
+        # 平移到实际转弯圆心（直角弯按路口角点平移；圆弧弯 center=(0,0) 不变）
+        x, y = x + ox, y + oy
+        ctr = (ctr[0] + ox, ctr[1] + oy)
         geom, tr_g, cg_g = _rigid_hydra_geoms(bundle, x, y, psi)
         ax = axle_steering_geoms(ctr[0], ctr[1], psi, tl, rho_f,
                                  na=na)

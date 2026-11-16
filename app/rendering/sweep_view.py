@@ -247,8 +247,9 @@ def _band_angle_avoiding(frames, center, r_in, r_out, turn_deg, label_pad=3.0):
 
     在 [8°, turn_deg−7°] 内逐度试算：以该角度作从 r_in−0.5 到 r_out+label_pad 的
     径向线段（含引出到文字的段落），若与任一车辆包络/货物多边形都不相交即视为可用；
-    在所有可用角度里取**最靠近弧中点**的那个（既不压车、又落在弯道中段）；
-    全被占时退回弧中点。
+    在所有可用角度里取**最靠近弧中点**的那个（既不压车、又落在弯道中段）。
+    全部角度都被车占住时返回 None——此时宁可不画标注，也不要把尺寸线压在车上
+    （窄路口、车板长相对走行半径很大时会出现这种情况，所需宽度仍见结论框）。
     """
     from shapely.geometry import LineString
     from shapely.ops import unary_union
@@ -271,7 +272,7 @@ def _band_angle_avoiding(frames, center, r_in, r_out, turn_deg, label_pad=3.0):
         if veh is None or not seg.intersects(veh):
             free.append(float(a))
     if not free:
-        return mid
+        return None
     return min(free, key=lambda a: abs(a - mid))
 
 
@@ -516,34 +517,38 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
             _locked_axle_axis_line(ax, _f, center)
 
     # —— 扫掠环带宽度标注 ——
-    #    标注角取"最空"的径向方位，避免标注线与已画车辆轮廓重叠
+    #    标注角取"最空"的径向方位，避免标注线与已画车辆轮廓重叠；
+    #    全被车辆占住（窄路口 + 长车板）时不画该标注，改由结论框给出所需宽度。
     mid_ang = _band_angle_avoiding(res.vehicle_frames, center,
                                    r_i, r_o, turn_deg)
     band_w = max(r_o - r_i, 0.0)
-    if scene == "arc":
-        if r_i > 0.5 and r_o > 0.5 and band_w > 0:
+    if mid_ang is not None and r_i > 0.5 and r_o > 0.5 and band_w > 0:
+        if scene == "arc":
             # 标注即所画环带的几何宽度 R_o−R_i（不加括注）
             _annotate_band(ax, center, r_i, r_o, mid_ang,
                            f"扫掠环带 R_o−R_i = {band_w:.2f}")
-    else:  # right_angle
-        if r_i > 0.5 and r_o > 0.5 and band_w > 0:
+        else:  # right_angle
             _annotate_band(ax, center, r_i, r_o, mid_ang,
                            f"扫掠宽度 W = {band_w:.2f}")
 
-        # —— 直角弯：交角 + 弯道（内角导圆）半径 标注 ——
+    # —— 直角弯：交角 + 弯道（内角导圆）半径 标注 ——
+    #    路口角点由计算层给出（与车辆走行半径解耦）；缺省时退回 r_path 老口径。
+    if scene != "arc":
         r_path = float(metrics.get("r_path", 0.0) or 0.0)
+        _cp = metrics.get("corner_point") or (r_path, r_path)
+        px, py = float(_cp[0]), float(_cp[1])
         if abs(turn_deg - 90.0) < 1e-6:
             eh = float(metrics.get("entry_width", 0.0) or 0.0) / 2.0
             xh = float(metrics.get("exit_width", 0.0) or 0.0) / 2.0
             # 交角：顶点锚在 L 形弯路的外角肘点（两条车道外缘线的交会点，
             # 即外角轴点），张角弧开口朝向弯道内侧，表示入口/出口两直道
             # 在转角处的夹角（区别于内角导圆那个"圆"）。
-            _annotate_angle(ax, (r_path + eh, r_path + xh), 90.0, 4.5,
+            _annotate_angle(ax, (px + eh, py + xh), 90.0, 4.5,
                             f"交角 {turn_deg:.0f}°", start_deg=180.0)
             # 弯道内半径：内角导圆的圆弧半径（圆心在内角顶点左下方）
             cr = float(metrics.get("corner_radius", 0.0) or 0.0)
             if cr > 1e-9:
-                cxx, cyy = r_path - eh - cr, r_path - xh - cr
+                cxx, cyy = px - eh - cr, py - xh - cr
                 ax.add_patch(Arc((cxx, cyy), 2 * cr, 2 * cr,
                                  theta1=0.0, theta2=90.0,
                                  color=DIM_COLOR, linewidth=0.9,
