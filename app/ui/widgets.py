@@ -8,18 +8,18 @@ from PyQt5.QtGui import QPainter
 from .qtutil import _app_font, _primary_screen_geometry
 
 # ===== “基础信息输入 / 绑扎数据输入”排版常量：统一字号、行距与标签列宽 =====
-# 字号调小一档（10pt → 9pt）：实际渲染字号由 main_window._LEFT_PANEL_QSS 就近
-# 指定，这里的常量保证尺寸提示与列宽同步收紧，两者需保持一致。
 FORM_FONT_SIZE = 9      # 标签/控件的字体(pt)
-FORM_INPUT_H = 28       # 所有输入控件统一高度，保证行排列整齐
-FORM_LABEL_W = 250      # 标签列统一宽度（“车板上表面离地高度(m)：”实测 244px，留出余量）
+FORM_INPUT_H = 29       # 所有输入控件统一高度，保证行排列整齐
+FORM_LABEL_W = 156      # 长字段标签在窄窗口自动换行
 FORM_INPUT_MAX_W = 200  # 输入控件最大宽度（避免长数字拥挤）
 FORM_V_SPACING = 7      # 行与行之间的垂直间距（行距均匀）
 
 
 def _row_label(text):
     lab = QLabel(text)
+    lab.setObjectName("FormLabel")
     lab.setFixedWidth(FORM_LABEL_W)
+    lab.setWordWrap(True)
     lab.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
     lab.setFont(_app_font(FORM_FONT_SIZE))
     return lab
@@ -43,6 +43,8 @@ def _new_edit(text="0.0"):
     ed.setMaximumWidth(FORM_INPUT_MAX_W)
     ed.setMinimumHeight(FORM_INPUT_H)
     ed.setFont(_app_font(FORM_FONT_SIZE))
+    if not text:
+        ed.setPlaceholderText("选填")
     return ed
 
 
@@ -53,22 +55,42 @@ def _make_form_group(title):
     form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
     form.setHorizontalSpacing(12)
     form.setVerticalSpacing(FORM_V_SPACING)
-    # 左内边距加大：让整块输入表单整体右移，并给较长标签留足显示空间
-    form.setContentsMargins(46, 14, 14, 14)
+    form.setContentsMargins(12, 12, 12, 12)
+    form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
     form.setRowWrapPolicy(QFormLayout.DontWrapRows)
     return g, form
 
 
 class ClickableImageLabel(QLabel):
-    """带点击信号的图片标签，点击时弹出大图预览窗口。"""
+    """适配视口大小的缩略图，点击时弹出原图。"""
     clicked = pyqtSignal()
 
     def __init__(self, text="", parent=None):
         super().__init__(text, parent)
-        self.setCursor(Qt.PointingHandCursor)
+        self._source = None
+        self.setAlignment(Qt.AlignCenter)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+
+    def set_preview(self, pixmap=None, placeholder=""):
+        self._source = pixmap
+        if pixmap is None:
+            self.setText(placeholder)
+            self.unsetCursor()
+        else:
+            self.setCursor(Qt.PointingHandCursor)
+            self._resize_preview()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._resize_preview()
+
+    def _resize_preview(self):
+        if self._source is not None:
+            self.setPixmap(self._source.scaled(self.contentsRect().size(),
+                                               Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self.pixmap() is not None:
+        if event.button() == Qt.LeftButton and self._source is not None:
             self.clicked.emit()
         super().mousePressEvent(event)
 
@@ -105,7 +127,7 @@ class ImageViewerDialog(QDialog):
     """大图预览窗口：滚轮缩放、鼠标拖拽平移、双击关闭。"""
     def __init__(self, pixmap, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("三视图预览（滚轮缩放 · 拖拽平移 · 双击关闭）")
+        self.setWindowTitle("扫掠图预览（滚轮缩放 · 拖拽平移）")
         geo = _primary_screen_geometry()
         self.resize(int(geo.width() * 0.92), int(geo.height() * 0.9))
         lay = QVBoxLayout(self)

@@ -26,12 +26,18 @@ def test_input_change_and_failed_render_cannot_reuse_old_result(monkeypatch):
         original = window.cur_result
         assert original.user_meta["c_height"] == "3.0"
         assert window._orig_pixmap is not None
+        assert window.btn_export.isEnabled()
+        assert window.btn_preview.isEnabled() and window.btn_save_img.isEnabled()
+        assert window.metric_labels[0][1].text().endswith(" m")
 
         window.edits["c_height"].setText("3.5")
         assert window.cur_result is None
         assert window._orig_pixmap is None
         assert window.text_result.toPlainText() == ""
         assert window.lbl_status.text() == "未运算"
+        assert not window.btn_export.isEnabled()
+        assert not window.btn_preview.isEnabled() and not window.btn_save_img.isEnabled()
+        assert all(value.text() == "—" for _, value in window.metric_labels)
 
         def fail_to_draw(*args):
             raise OSError("render failed")
@@ -41,6 +47,7 @@ def test_input_change_and_failed_render_cannot_reuse_old_result(monkeypatch):
         assert window.cur_result.user_meta["c_height"] == "3.5"
         assert original.user_meta["c_height"] == "3.0"
         assert window._orig_pixmap is None
+        assert window.btn_export.isEnabled() and not window.btn_save_img.isEnabled()
     finally:
         window.close()
         app.processEvents()

@@ -1,4 +1,4 @@
-"""主窗口：左栏三页签输入表单 + 右栏扫掠图与结论。
+"""主窗口：工况配置、扫掠图和检验结论。
 
 字段表单与 Pydantic 数据模型(InputBundle)一一对应；点击“运行检验”后：
   采集表单 → 构建 InputBundle → run_scene 仿真 → draw_sweep_view 出图
@@ -8,12 +8,12 @@ import os
 import datetime
 from io import BytesIO
 
-from PyQt5.QtWidgets import (QMainWindow, QLabel, QPushButton, QFileDialog,
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton, QFileDialog,
                              QVBoxLayout, QHBoxLayout, QTabWidget,
                              QScrollArea, QFrame, QSplitter, QTextBrowser, QWidget,
                              QMessageBox)
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QKeySequence, QPixmap
 
 from config import (APP_NAME, APP_VERSION, ROAD_TYPES, TRAILER_TYPES,
                     ACCEPTANCE_NOTE, EXPORT_PWD, MODEL_SUFFIX,
@@ -29,17 +29,10 @@ from app.core.passability import run_scene
 from app.rendering.sweep_view import draw_sweep_view
 from app.rendering.verdict_style import colorize_verdict_html
 from app.model.project import save_model, load_model, ensure_suffix
-from .qtutil import APP_QSS, _app_font, _primary_screen_geometry
+from .qtutil import _app_font, _primary_screen_geometry
+from .workspace_style import workspace_stylesheet
 from .widgets import (_make_form_group, _row_label, _new_combo, _new_edit,
                       ClickableImageLabel)
-
-# 左栏页签用小一号字(继承参考项目排版：FORM_FONT_SIZE 与整体 QSS 分离)
-_LEFT_PANEL_QSS = """
-QWidget { font-size: 9pt; }
-QGroupBox { font-size: 10pt; font-weight: bold; }
-QLabel { font-size: 9pt; }
-QLineEdit, QComboBox { font-size: 9pt; }
-"""
 
 # ===== 窗体左侧输入表单的字段定义：控件键 → (标签, Pydantic 字段) =====
 # 键前缀区分货物(c_)/挂车(t_)/牵引车(tr_)，避免 length/width 等重名覆盖。
@@ -57,7 +50,7 @@ _TRAILER_FIELDS = [
     ("挂车轴数", "t_axle_count", "axle_count", True),
     ("挂车轴距(m)", "t_axle_spacing", "axle_spacing", True),
     ("轮距(m)", "t_track_width", "track_width", True),
-    ("牵引销至挂车转动中心轴距离(m，可留空)", "t_kingpin_to_axle", "kingpin_to_axle", False),
+    ("牵引销至转动中心轴 (m)", "t_kingpin_to_axle", "kingpin_to_axle", False),
 ]
 # 仅液压轴线挂车显示的参数（选挂车类型=液压后整组可见）；标签不带“(液压)”后缀。
 # 连接方式/连接部分长度为纯绘图参数且当前渲染路径未使用，不再提供输入（模型默认 0/鹅颈）。
@@ -68,7 +61,7 @@ _TRACTOR_FIELDS = [
     ("牵引车轴距(m)", "tr_wheelbase", "wheelbase", True),
     ("最大转向角(°)", "tr_max_steering_angle_deg", "max_steering_angle_deg", True),
     ("牵引车宽度(m)", "tr_width", "width", True),
-    ("牵引车前轮轮距(m，可留空)", "tr_track_width", "track_width", False),
+    ("牵引车前轮轮距 (m)", "tr_track_width", "track_width", False),
     ("鞍座至后轴距离(m)", "tr_fifth_wheel_pos", "fifth_wheel_pos", True),
 ]
 _ARC_FIELDS = [
@@ -79,22 +72,20 @@ _RIGHT_FIELDS = [
     ("入口宽度(m)", "entry_width", True),
     ("出口宽度(m)", "exit_width", True),
     ("弯道内半径(m)", "corner_radius", True),
-    ("左转物理区可通行宽 W_section(m,可留空)", "W_section", False),
-    ("左转处可通行宽 W_lturn(m,可留空)", "W_lturn", False),
+    ("左转物理区可通行宽 (m)", "W_section", False),
+    ("左转处可通行宽 (m)", "W_lturn", False),
     # 交角固定为 90°（直角弯道），不再提供输入
 ]
 _OPTIONAL_INPUTS = ("t_kingpin_to_axle", "tr_track_width", "superelevation", "combined_cg_height")
-
-
-def _esc_html(s: str) -> str:
-    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+_EMPTY_PREVIEW = "运行弯道检验后，扫掠图将在此显示"
 
 
 class MainWindow(QMainWindow):
     _STATUS_STYLE = {
-        "none": ("未运算", "#d9d9d9", "#000000"),
-        "ok": ("通过", "#2f855a", "#ffffff"),
-        "ng": ("不通过", "#c53030", "#ffffff"),
+        "none": ("未运算", "#edf2f7", "#40596e"),
+        "running": ("检验中", "#e0f1f8", "#12617e"),
+        "ok": ("通过", "#e2f5ec", "#126047"),
+        "ng": ("不通过", "#fce9ea", "#a12435"),
     }
 
     def __init__(self):
@@ -102,7 +93,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME}{APP_VERSION}")
         geo = _primary_screen_geometry()
         self.resize(min(1600, int(geo.width() * 0.94)), min(1000, int(geo.height() * 0.92)))
-        self.setStyleSheet(APP_QSS)
+        self.setStyleSheet(workspace_stylesheet())
         self.setFont(_app_font(10))
         self.init_data()
         self.init_menu()
@@ -127,11 +118,11 @@ class MainWindow(QMainWindow):
     def init_menu(self):
         bar = self.menuBar()
         m_file = bar.addMenu("文件(&F)")
-        m_file.addAction("新建模型", self.action_new)
-        m_file.addAction("打开模型", self.action_open)
+        m_file.addAction("新建模型", self.action_new, QKeySequence.New)
+        m_file.addAction("打开模型", self.action_open, QKeySequence.Open)
         m_file.addSeparator()
-        m_file.addAction("保存", self.action_save)
-        m_file.addAction("另存为", self.action_saveas)
+        m_file.addAction("保存", self.action_save, QKeySequence.Save)
+        m_file.addAction("另存为", self.action_saveas, QKeySequence.SaveAs)
         m_file.addSeparator()
         m_file.addAction("退出系统", self.close)
         m_tool = bar.addMenu("工具(&T)")
@@ -142,82 +133,139 @@ class MainWindow(QMainWindow):
     # ================= 界面 =================
     def init_ui(self):
         central = QWidget()
+        central.setObjectName("Workspace")
         self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(14, 10, 14, 14)
+        layout.setSpacing(10)
+        layout.addWidget(self._build_header())
+
         splitter = QSplitter(Qt.Horizontal)
-        left_w = QWidget()
-        left_w.setMaximumWidth(720)
-        left_v = QVBoxLayout(left_w)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(9)
+        splitter.addWidget(self._build_inputs())
+        splitter.addWidget(self._build_results())
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        input_width = min(412, max(360, self.width() // 3))
+        splitter.setSizes([input_width, max(430, self.width() - input_width - 37)])
+        layout.addWidget(splitter, 1)
+        self.action_clear_result()
 
+    @staticmethod
+    def _heading(text, style="PanelTitle"):
+        label = QLabel(text)
+        label.setObjectName(style)
+        return label
+
+    def _build_header(self):
+        header = QFrame()
+        header.setObjectName("WorkspaceHeader")
+        row = QHBoxLayout(header)
+        row.setContentsMargins(17, 10, 14, 10)
+        row.setSpacing(8)
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        titles.addWidget(self._heading("大件运输弯道检验", "WorkspaceTitle"))
+        self.model_label = self._heading("未命名模型", "ModelName")
+        titles.addWidget(self.model_label)
+        row.addLayout(titles)
+        row.addStretch(1)
+        for label, action in (("打开模型", self.action_open), ("保存模型", self.action_save)):
+            button = QPushButton(label)
+            button.setObjectName("HeaderAction")
+            button.setMinimumHeight(32)
+            button.clicked.connect(action)
+            row.addWidget(button)
+        return header
+
+    def _build_inputs(self):
+        panel = QWidget()
+        panel.setObjectName("InputPanel")
+        panel.setMinimumWidth(360)
+        panel.setMaximumWidth(560)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(13, 12, 13, 12)
+        layout.setSpacing(9)
+        layout.addWidget(self._heading("检验工况"))
         tab = QTabWidget()
-        tab.setStyleSheet(_LEFT_PANEL_QSS)
-        tab.tabBar().setExpanding(False)
-        tab.tabBar().setUsesScrollButtons(False)
-        tab.tabBar().setElideMode(Qt.ElideNone)
+        tab.addTab(self._build_input_tab(), "车辆与货物")
+        tab.addTab(self._build_road_tab(), "道路与工况")
+        layout.addWidget(tab, 1)
+        self.btn_calc = QPushButton("运行弯道检验")
+        self.btn_calc.setObjectName("RunButton")
+        self.btn_calc.setMinimumHeight(38)
+        self.btn_calc.clicked.connect(self.run_calc)
+        layout.addWidget(self.btn_calc)
+        return panel
 
-        tab.addTab(self._build_input_tab(), "运输及车辆参数")
-        tab.addTab(self._build_road_tab(), "弯道参数")
-        left_v.addWidget(tab)
-
-        btn_calc = QPushButton("运行弯道检验并出图")
-        btn_calc.setMinimumHeight(46)
-        btn_calc.setFont(_app_font(13, bold=True))
-        btn_calc.setStyleSheet("padding:8px;border-radius:6px;background:#2b6cb0;color:white;")
-        btn_calc.clicked.connect(self.run_calc)
-        btn_export = QPushButton("一键生成Word报告")
-        btn_export.setMinimumHeight(46)
-        btn_export.setFont(_app_font(13, bold=True))
-        btn_export.setStyleSheet("padding:8px;border-radius:6px;background:#2f855a;color:white;")
-        btn_export.clicked.connect(self.export_word)
-        btn_h = QHBoxLayout()
-        btn_h.setSpacing(10)
-        btn_h.addWidget(btn_calc, 1)
-        btn_h.addWidget(btn_export, 1)
-        left_v.addLayout(btn_h)
-        splitter.addWidget(left_w)
-
-        right_w = QWidget()
-        right_v = QVBoxLayout(right_w)
-        img_title = QHBoxLayout()
-        img_title.addWidget(QLabel("弯道扫掠检验图（点击图片可放大预览）"))
-        img_title.addStretch(1)
-        self.btn_save_img = QPushButton("保存扫掠图")
-        self.btn_save_img.setMinimumHeight(34)
-        self.btn_save_img.setFont(_app_font(12, bold=True))
-        self.btn_save_img.setStyleSheet("padding:6px 18px;border-radius:6px;background:#3182ce;color:white;")
-        self.btn_save_img.clicked.connect(self.save_sweep_img)
-        img_title.addWidget(self.btn_save_img)
-        right_v.addLayout(img_title)
-
-        self.img_label = ClickableImageLabel("")
-        self.img_label.setAlignment(Qt.AlignCenter)
-        self.img_label.setMinimumHeight(430)
-        self.img_label.clicked.connect(self.open_image_viewer)
-        right_v.addWidget(self.img_label)
-
-        res_title = QHBoxLayout()
-        res_title.setSpacing(10)
-        res_title.addWidget(QLabel("检验过程及结论"))
-        res_title.addStretch(1)
+    def _build_results(self):
+        panel = QWidget()
+        panel.setObjectName("ResultPanel")
+        panel.setMinimumWidth(430)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(9)
+        title_row = QHBoxLayout()
+        title_row.addWidget(self._heading("单处弯道结果"))
+        title_row.addStretch(1)
         self.lbl_status = QLabel()
         self.lbl_status.setAlignment(Qt.AlignCenter)
-        self.lbl_status.setFixedSize(92, 30)
-        res_title.addWidget(self.lbl_status)
-        right_v.addLayout(res_title)
-        self.set_status_badge("none")
+        self.lbl_status.setMinimumWidth(65)
+        title_row.addWidget(self.lbl_status)
+        self.btn_export = QPushButton("导出 Word")
+        self.btn_export.setMinimumHeight(30)
+        self.btn_export.clicked.connect(self.export_word)
+        title_row.addWidget(self.btn_export)
+        layout.addLayout(title_row)
+        self.scenario_label = self._heading("", "ScenarioLabel")
+        layout.addWidget(self.scenario_label)
 
+        metrics = QHBoxLayout()
+        metrics.setSpacing(7)
+        self.metric_labels = []
+        for _ in range(3):
+            card = QFrame()
+            card.setObjectName("MetricCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 6, 10, 7)
+            card_layout.setSpacing(2)
+            name = self._heading("", "MetricTitle")
+            value = self._heading("", "MetricValue")
+            card_layout.addWidget(name)
+            card_layout.addWidget(value)
+            self.metric_labels.append((name, value))
+            metrics.addWidget(card, 1)
+        layout.addLayout(metrics)
+
+        self.result_tabs = QTabWidget()
+        graph = QWidget()
+        graph_layout = QVBoxLayout(graph)
+        graph_layout.setContentsMargins(0, 8, 0, 0)
+        graph_layout.setSpacing(6)
+        graph_actions = QHBoxLayout()
+        graph_actions.addStretch(1)
+        self.btn_preview = QPushButton("放大预览")
+        self.btn_preview.clicked.connect(self.open_image_viewer)
+        self.btn_save_img = QPushButton("保存 PNG")
+        self.btn_save_img.clicked.connect(self.save_sweep_img)
+        graph_actions.addWidget(self.btn_preview)
+        graph_actions.addWidget(self.btn_save_img)
+        graph_layout.addLayout(graph_actions)
+        self.img_label = ClickableImageLabel()
+        self.img_label.setObjectName("SweepPreview")
+        self.img_label.setMinimumHeight(160)
+        self.img_label.clicked.connect(self.open_image_viewer)
+        graph_layout.addWidget(self.img_label, 1)
+        self.result_tabs.addTab(graph, "扫掠图")
         self.text_result = QTextBrowser()
         self.text_result.setOpenExternalLinks(False)
-        self.text_result.document().setDocumentMargin(6)
-        right_v.addWidget(self.text_result)
-        splitter.addWidget(right_w)
-        splitter.setStretchFactor(0, 10)
-        splitter.setStretchFactor(1, 22)
-        splitter.setSizes([700, max(760, self.width() - 700)])
+        self.text_result.document().setDocumentMargin(8)
+        self.result_tabs.addTab(self.text_result, "判定明细")
+        layout.addWidget(self.result_tabs, 1)
+        return panel
 
-        layout = QVBoxLayout(central)
-        layout.addWidget(splitter)
-
-    # ---- 三个页签 ----
+    # ---- 工况表单 ----
     def _build_input_tab(self):
         tab = QWidget()
         outer = QVBoxLayout(tab)
@@ -226,13 +274,14 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         inner = QWidget()
+        inner.setObjectName("FormSurface")
         v = QVBoxLayout(inner)
-        v.setContentsMargins(10, 10, 10, 10)
-        v.setSpacing(12)
+        v.setContentsMargins(0, 6, 7, 5)
+        v.setSpacing(8)
         v.setSizeConstraint(QVBoxLayout().SetMinimumSize)
 
         # 1. 货物参数
-        g_c, f_c = _make_form_group("1. 装载货物参数")
+        g_c, f_c = _make_form_group("货物")
         for label, key, field, numeric in _CARGO_FIELDS:
             ed = _new_edit("0.0")
             self.edits[key] = ed
@@ -242,7 +291,7 @@ class MainWindow(QMainWindow):
         v.addWidget(g_c)
 
         # 2. 挂车参数
-        g_t, f_t = _make_form_group("2. 承载挂车参数")
+        g_t, f_t = _make_form_group("挂车")
         self.cmb_trailer_type = _new_combo(TRAILER_TYPES, TRAILER_TYPES[0] if TRAILER_TYPES else "")
         f_t.addRow(_row_label("挂车类型："), self.cmb_trailer_type)
         for label, key, field, numeric in _TRAILER_FIELDS:
@@ -265,7 +314,7 @@ class MainWindow(QMainWindow):
         self._sync_hydraulic_fields()
 
         # 3. 牵引车参数
-        g_car, f_car = _make_form_group("3. 牵引车参数")
+        g_car, f_car = _make_form_group("牵引车")
         for label, key, field, numeric in _TRACTOR_FIELDS:
             ed = _new_edit("0.0" if numeric else "")
             self.edits[key] = ed
@@ -285,12 +334,13 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         inner = QWidget()
+        inner.setObjectName("FormSurface")
         v = QVBoxLayout(inner)
-        v.setContentsMargins(10, 10, 10, 10)
-        v.setSpacing(12)
+        v.setContentsMargins(0, 6, 7, 5)
+        v.setSpacing(8)
         v.setSizeConstraint(QVBoxLayout().SetMinimumSize)
 
-        g_top, f_top = _make_form_group("1. 弯道方式")
+        g_top, f_top = _make_form_group("道路条件")
         self.cmb_road = _new_combo(ROAD_TYPES, ROAD_TYPES[0] if ROAD_TYPES else "")
         self.cmb_road.currentTextChanged.connect(self._sync_road_fields)
         f_top.addRow(_row_label("弯道类型："), self.cmb_road)
@@ -300,7 +350,7 @@ class MainWindow(QMainWindow):
         v.addWidget(g_top)
 
         # 圆弧弯道
-        self.g_arc, f_arc = _make_form_group("2. 圆弧弯道参数")
+        self.g_arc, f_arc = _make_form_group("圆弧几何")
         self._arc_edits = {}
         for name, key, numeric in _ARC_FIELDS:
             ed = _new_edit("0.0")
@@ -309,7 +359,7 @@ class MainWindow(QMainWindow):
         v.addWidget(self.g_arc)
 
         # 直角弯道
-        self.g_right, f_right = _make_form_group("2. 直角弯道参数")
+        self.g_right, f_right = _make_form_group("路口几何")
         self.cmb_turn_direction = _new_combo(["右转", "左转"], "右转")
         f_right.addRow(_row_label("实际转向："), self.cmb_turn_direction)
         self._right_edits = {}
@@ -320,15 +370,16 @@ class MainWindow(QMainWindow):
         v.addWidget(self.g_right)
 
         # 满载工况
-        g_cond, f_cond = _make_form_group("3. 运行工况与道路等级")
+        g_cond, f_cond = _make_form_group("运行工况")
         self.cmb_grade = _new_combo(HIGHWAY_GRADES, "三级公路")
         f_cond.addRow(_row_label("公路等级："), self.cmb_grade)
         ed = _new_edit("10.0")
         self.edits["max_speed_kmh"] = ed
         f_cond.addRow(_row_label("最高行驶速度(km/h)："), ed)
-        for label, key in (("弯道超高率(如 0.02，可留空)", "superelevation"),
-                           ("车货总体重心离地高(m，可留空)", "combined_cg_height")):
+        for label, key, hint in (("弯道超高率", "superelevation", "选填，如 0.02"),
+                                 ("车货总体重心离地高 (m)", "combined_cg_height", "选填")):
             ed = _new_edit("")
+            ed.setPlaceholderText(hint)
             self.edits[key] = ed
             f_cond.addRow(_row_label(f"{label}："), ed)
         v.addWidget(g_cond)
@@ -355,8 +406,40 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(text)
         self.lbl_status.setStyleSheet(
             "QLabel {"
-            f"background-color: {bg}; color: {fg}; border-radius: 6px;"
-            "font-size: 11pt; font-weight: normal;}")
+            f"background-color: {bg}; color: {fg}; border-radius: 7px;"
+            "padding: 4px 8px; font-size: 9pt; font-weight: 700;}")
+
+    def _refresh_metrics(self):
+        road_type = self.cmb_road.currentText()
+        is_right_angle = road_type == "直角弯道"
+        grade = self.cmb_grade.currentText()
+        direction = f" · {self.cmb_turn_direction.currentText()}" if is_right_angle else ""
+        self.scenario_label.setText(f"{road_type}{direction} · {grade}")
+        names = ("所需宽度", "最大侵入深度", "顶部净空间隙") if is_right_angle else (
+            "转弯通道宽度", "最小横向净空", "顶部净空间隙")
+        values = (None, None, None)
+        if self.cur_result is not None:
+            metrics = self.cur_result.metrics
+            if is_right_angle:
+                width = metrics["required_w"]
+                horizontal = None if metrics["split_error"] else max(
+                    metrics["vehicle_depth"], metrics["cargo_depth"])
+            else:
+                width = metrics["turn_channel_w"]
+                horizontal = min(metrics["clearance_inner"], metrics["clearance_outer"])
+                if metrics["lookup"] == "pass":
+                    names = ("通道宽度（参考）", *names[1:])
+            vertical = self.cur_result.user_meta["vertical_clearance"] - metrics["total_height"]
+            values = (width, horizontal, vertical)
+        for (title, output), name, value in zip(self.metric_labels, names, values):
+            title.setText(name)
+            output.setText("—" if value is None else f"{value:.3f} m")
+
+    def _set_model_path(self, path):
+        self.current_model_path = path
+        name = os.path.basename(path) if path else "未命名模型"
+        self.model_label.setText(self.model_label.fontMetrics().elidedText(name, Qt.ElideMiddle, 290))
+        self.model_label.setToolTip(path)
 
     # ================= 表单采集 → InputBundle =================
     def _f(self, key, default="0.0"):
@@ -443,11 +526,19 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "输入错误", f"参数采集/校验失败：\n{e}")
             return
+        self.set_status_badge("running")
+        self.lbl_status.repaint()
+        self.btn_calc.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             res = run_scene(bundle)
         except Exception as e:
+            self.set_status_badge("none")
             QMessageBox.critical(self, "仿真失败", f"弯道通过性仿真出错：\n{e}")
             return
+        finally:
+            self.btn_calc.setEnabled(True)
+            QApplication.restoreOverrideCursor()
         res.user_meta = model_data
         self.cur_result = res
         try:
@@ -457,24 +548,36 @@ class MainWindow(QMainWindow):
                 if not pm.loadFromData(image.getvalue(), "PNG"):
                     raise ValueError("无法读取生成的扫掠图")
         except Exception as e:
+            self.img_label.set_preview(placeholder="扫掠图生成失败，可查看判定明细")
             QMessageBox.warning(self, "出图失败", f"扫掠图生成失败：{e}")
         else:
             self._orig_pixmap = pm
-            self.img_label.setPixmap(pm.scaled(self.img_label.size(),
-                                               Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.img_label.set_preview(pm)
+            self.btn_preview.setEnabled(True)
+            self.btn_save_img.setEnabled(True)
+            self.result_tabs.setCurrentIndex(0)
+        self.btn_export.setEnabled(True)
         self.set_status_badge("ok" if res.pass_ok else "ng")
+        self._refresh_metrics()
         self._render_result(res)
 
     def _render_result(self, res):
         # verdict_lines 已含 HTML 标记（<sub>/<sup> 上下标）与判定词，先对判定词
         # 上色（通过/满足/合格=绿，不通过/不满足/不合格=红），再以富文本渲染
-        lines = [colorize_verdict_html(ln) for ln in res.verdict_lines]
+        lines = []
+        for line in res.verdict_lines:
+            if line.startswith("【") and line.endswith("】"):
+                lines.append(f"<p style='margin:12px 0 4px;font-size:12pt;color:#123c5e;'>"
+                             f"<b>{line[1:-1]}</b></p>")
+            else:
+                lines.append(f"<p style='margin:0 0 4px;'>{colorize_verdict_html(line)}</p>")
         verdict = "通过" if res.pass_ok else "不通过"
         color = "#2f855a" if res.pass_ok else "#c53030"
-        lines.append(f"<b style='color:{color};font-size:12pt;'>【结论】检验结论：{verdict}</b>")
+        lines.append(f"<p style='margin:12px 0;'><b style='color:{color};font-size:12pt;'>"
+                     f"弯道检验结论：{verdict}</b></p>")
         self.text_result.setHtml(
-            "<div style='font-size:11pt;line-height:1.6;'>"
-            + "<br>".join(lines) + "</div>")
+            "<div style='font-size:10pt;color:#223d54;line-height:1.45;'>"
+            + "".join(lines) + "</div>")
 
     # ================= 图片操作 =================
     def save_sweep_img(self):
@@ -549,7 +652,7 @@ class MainWindow(QMainWindow):
         self.cmb_road.setCurrentText(ROAD_TYPES[0])
         self._sync_road_fields()
         self.action_clear_result()
-        self.current_model_path = ""
+        self._set_model_path("")
 
     def action_open(self):
         from PyQt5.QtWidgets import QFileDialog
@@ -562,7 +665,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "打开失败", f"{e}")
                 return
             self.unpack_model_data(d)
-            self.current_model_path = path
+            self._set_model_path(path)
             QMessageBox.information(self, "已打开", f"模型已加载：{os.path.basename(path)}")
 
     def action_save(self):
@@ -583,7 +686,7 @@ class MainWindow(QMainWindow):
             path = ensure_suffix(path)
             try:
                 save_model(self.pack_model_data(), path)
-                self.current_model_path = path
+                self._set_model_path(path)
                 QMessageBox.information(self, "保存成功", "模型已保存。")
             except Exception as e:
                 QMessageBox.warning(self, "保存失败", f"{e}")
@@ -593,7 +696,12 @@ class MainWindow(QMainWindow):
         self.set_status_badge("none")
         self.text_result.clear()
         self._orig_pixmap = None
-        self.img_label.clear()
+        self.img_label.set_preview(placeholder=_EMPTY_PREVIEW)
+        self.btn_preview.setEnabled(False)
+        self.btn_save_img.setEnabled(False)
+        self.btn_export.setEnabled(False)
+        self._refresh_metrics()
+        self.result_tabs.setCurrentIndex(0)
 
     def action_show_acceptance(self):
         QMessageBox.information(self, "检验方法依据", ACCEPTANCE_NOTE)
