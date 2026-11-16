@@ -1,4 +1,4 @@
-"""计算模型(.trans_model) 的 JSON 持久化。
+"""计算模型(.model) 的 JSON 持久化。
 
 负责模型的读写与文件后缀规整；字段的组装/还原由界面层完成
 （取决于当前表单控件状态，属于视图层职责）。
@@ -9,9 +9,12 @@ from config import MODEL_SUFFIX
 
 
 def load_model(path):
-    """读取 .trans_model 模型文件并反序列化为 dict。"""
+    """读取 .model 模型文件并反序列化为 dict。"""
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("模型文件的顶层必须是 JSON 对象。")
+    return data
 
 
 def save_model(data, path):

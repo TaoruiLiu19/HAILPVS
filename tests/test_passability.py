@@ -11,6 +11,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.datamodel import (InputBundle, CargoParams, TrailerParams,
                                 TractorParams, RoadParams, ArcCorner,
@@ -136,6 +137,38 @@ def test_b12_theta_clamped_to_axle_max():
     r = hydraulic_turn_radii(_h_bundle(tl), actual_turn_radius=26.5)
     assert r["theta_deg"] == pytest.approx(3.0, abs=1e-9)
     assert r["base"] > 26.5
+
+
+@pytest.mark.parametrize("max_angle, expected_pass", [(1.0, False), (45.0, True)])
+def test_hydraulic_arc_requires_achievable_steering(max_angle, expected_pass):
+    bundle = _h_bundle(_h_trailer(axle_max_steering_angle_deg=max_angle),
+                       outer=30.0, lane=12.0)
+    res = run_scene(bundle)
+    assert res.metrics["B1_2_theta_required_deg"] == pytest.approx(
+        math.degrees(math.atan(2.25 / (24.0 - 1.45))))
+    assert res.metrics["steering_ok"] is expected_pass
+    assert res.pass_ok is expected_pass
+
+
+def test_b12_uses_actual_small_angle_on_large_radius():
+    bundle = _h_bundle(_h_trailer(axle_max_steering_angle_deg=0.5))
+    r = hydraulic_turn_radii(bundle, actual_turn_radius=500.0)
+    assert 0 < r["theta_deg"] < 0.5
+    assert r["base"] == pytest.approx(500.0 - r["track"] / 2.0)
+
+
+@pytest.mark.parametrize("lane_width", [10.0, 11.0])
+def test_arc_requires_positive_inner_radius(lane_width):
+    with pytest.raises(ValidationError, match="道路内半径为正"):
+        ArcCorner(outer_radius=10.0, lane_width=lane_width)
+
+
+def test_arc_road_boundary_stays_at_input_radius_when_tractor_steering_is_limited():
+    bundle = _arc_bundle(outer=30.0, lane=7.0)
+    bundle.tractor.max_steering_angle_deg = 5.0
+    res = run_scene(bundle)
+    assert res.metrics["R_path"] > bundle.road.arc.outer_radius
+    assert res.road.bounds[2] == pytest.approx(bundle.road.arc.outer_radius, abs=0.002)
 
 
 def test_b12_la_is_track_width():
@@ -596,10 +629,14 @@ def test_right_angle_swept_check_is_universal():
 
 
 def test_b12_theta_min():
-    # 下端 1° 钳制，防 tan 除零
+    r = hydraulic_turn_radii(_h_bundle(_h_trailer()), turn_angle_theta=0.0)
+    assert r["theta_deg"] == pytest.approx(MIN_TURN_ANGLE_DEG)
+
+
+def test_b12_does_not_increase_a_subdegree_axle_limit():
     tl = _h_trailer(axle_max_steering_angle_deg=0.5)
     r = hydraulic_turn_radii(_h_bundle(tl))
-    assert r["theta_deg"] == pytest.approx(MIN_TURN_ANGLE_DEG, abs=1e-9)
+    assert r["theta_deg"] == pytest.approx(0.5)
     assert math.isfinite(r["R_in"]) and math.isfinite(r["R_out"])
 
 
@@ -872,6 +909,14 @@ def test_vertical_tunnel_threshold_stricter():
     b.road.clearance_structure_type = "隧道"
     res = run_scene(b)
     assert res.metrics["vert_clearance_ok"] is False
+
+
+def test_vertical_ramp_intermediate_gap_requires_measures():
+    bundle = _arc_bundle(vertical=4.26)
+    bundle.road.clearance_structure_type = "匝道"
+    res = run_scene(bundle)
+    assert res.metrics["vert_clearance_ok"] is True
+    assert any("匝道顶部净空" in line and "需采取措施" in line for line in res.verdict_lines)
 
 
 # ---- P0-4: 圆弧判定使用横向空间宽度（废止 lane-2σ）----

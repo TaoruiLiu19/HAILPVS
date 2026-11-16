@@ -245,7 +245,8 @@ def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None,
          避免把"结构最大转角下的最紧转弯固有参数"误用于实际弯道。
       3) 均未给 → 挂车轴结构最大转向角 axle_max_steering_angle_deg（固有最不利口径）。
     θ 受挂车轴结构最大转角与工程上限 AXLE_STEER_ABS_LIMIT_DEG 双重钳制(D6)，
-    下端受 MIN_TURN_ANGLE_DEG 防除零。
+    显式指定角度时用 MIN_TURN_ANGLE_DEG 防除零。按实际半径反算时，
+    保留所需转角用于能力校核，可行的大半径使用实际小转角。
 
     D1 locked_axles 双口径：默认严格守规范(中间锁死不改变 s)；仅当锁死轴
     含首/末轴时走规范外推，s=L(last_active−first_active) 并告警。
@@ -277,15 +278,16 @@ def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None,
     # D2/D6/D9：θ 取值优先级 = 显式值 > 实际弯道半径反算 > 挂车轴结构最大转角
     theta_max_deg = min(float(tl.axle_max_steering_angle_deg),
                         AXLE_STEER_ABS_LIMIT_DEG)
+    theta_required_deg = None
     if turn_angle_theta is not None:
-        theta_deg = float(turn_angle_theta)
+        theta_deg = min(max(float(turn_angle_theta), MIN_TURN_ANGLE_DEG), theta_max_deg)
     elif actual_turn_radius is not None and float(actual_turn_radius) > 0.0:
         # D9：base 为内侧轮迹线偏距，车板中心走行半径 R 时 base = R − 轮距/2
-        base_target = max(float(actual_turn_radius) - track / 2.0, 1e-6)
-        theta_deg = math.degrees(math.atan(d / (2.0 * base_target)))
+        base_target = float(actual_turn_radius) - track / 2.0
+        theta_required_deg = math.degrees(math.atan2(d, 2.0 * base_target))
+        theta_deg = min(theta_required_deg, theta_max_deg)
     else:
         theta_deg = theta_max_deg
-    theta_deg = max(MIN_TURN_ANGLE_DEG, min(theta_deg, theta_max_deg))
     theta = math.radians(theta_deg)
 
     # 动力机组长度 C（B.1.2-5 根号内横项 +C），界面未给时回退 config 缺省(默认 0 → 无 C)
@@ -335,6 +337,7 @@ def hydraulic_turn_radii(bundle: InputBundle, turn_angle_theta=None,
         "R_vehicle_in": r_veh_in, "R_vehicle_out": r_veh_out,
         "power_unit_len": power_unit_len,
         "base": base, "theta_deg": round(theta_deg, 4),
+        "theta_required_deg": theta_required_deg, "theta_max_deg": theta_max_deg,
         "d": d, "D_total": w_total, "track": track, "La": la,
         "turn_radius": (float(actual_turn_radius)
                         if actual_turn_radius else None),

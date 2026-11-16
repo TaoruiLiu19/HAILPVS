@@ -665,9 +665,11 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
 
 def draw_sweep_view(res: SweepScenarioResult, out_path, dpi=PLOT_DPI,
                     figsize=(12, 10)):
-    """绘制 CAD 线框风格扫掠工程图并保存。返回图路径。"""
-    fig, ax = build_figure(res, figsize)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
+    """绘制 CAD 线框风格扫掠工程图，保存到路径或二进制流。"""
+    fig, _ = build_figure(res, figsize)
+    try:
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+    finally:
+        plt.close(fig)
     return out_path

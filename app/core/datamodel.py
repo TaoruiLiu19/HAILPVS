@@ -69,6 +69,12 @@ class ArcCorner(BaseModel):
     outer_radius: float = Field(gt=0, description="道路外半径(m)，内半径 = 外半径 − 车道宽")
     lane_width: float = Field(gt=0, description="车道宽度(m)")
 
+    @model_validator(mode="after")
+    def _check_inner_radius(self):
+        if self.lane_width >= self.outer_radius:
+            raise ValueError("车道宽度必须小于道路外半径，确保道路内半径为正。")
+        return self
+
 
 class RightAngleCorner(BaseModel):
     """直角弯道。"""

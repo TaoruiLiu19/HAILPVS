@@ -6,6 +6,7 @@
 """
 import os
 import datetime
+from io import BytesIO
 
 from PyQt5.QtWidgets import (QMainWindow, QLabel, QPushButton, QFileDialog,
                              QVBoxLayout, QHBoxLayout, QTabWidget,
@@ -39,9 +40,6 @@ QGroupBox { font-size: 10pt; font-weight: bold; }
 QLabel { font-size: 9pt; }
 QLineEdit, QComboBox { font-size: 9pt; }
 """
-
-_TMP_IMG = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                        "temp_sweep.png")
 
 # ===== 窗体左侧输入表单的字段定义：控件键 → (标签, Pydantic 字段) =====
 # 键前缀区分货物(c_)/挂车(t_)/牵引车(tr_)，避免 length/width 等重名覆盖。
@@ -106,6 +104,11 @@ class MainWindow(QMainWindow):
         self.init_data()
         self.init_menu()
         self.init_ui()
+        for edits in (self.edits, self._arc_edits, self._right_edits):
+            for edit in edits.values():
+                edit.textChanged.connect(self.action_clear_result)
+        for combo in (self.cmb_pad, self.cmb_trailer_type, self.cmb_road, self.cmb_grade):
+            combo.currentTextChanged.connect(self.action_clear_result)
 
     # ================= 数据状态 =================
     def init_data(self):
@@ -418,29 +421,32 @@ class MainWindow(QMainWindow):
                            max_speed_kmh=self._f("max_speed_kmh"))
 
     def run_calc(self):
+        self.action_clear_result()
         try:
             bundle = self.collect_bundle()
+            model_data = self.pack_model_data()
         except Exception as e:
             QMessageBox.warning(self, "输入错误", f"参数采集/校验失败：\n{e}")
             return
         try:
-            self.cur_result = run_scene(bundle)
+            res = run_scene(bundle)
         except Exception as e:
             QMessageBox.critical(self, "仿真失败", f"弯道通过性仿真出错：\n{e}")
-            self.set_status_badge("ng")
             return
-        res = self.cur_result
+        res.user_meta = model_data
+        self.cur_result = res
         try:
-            draw_sweep_view(res, _TMP_IMG)
+            with BytesIO() as image:
+                draw_sweep_view(res, image)
+                pm = QPixmap()
+                if not pm.loadFromData(image.getvalue(), "PNG"):
+                    raise ValueError("无法读取生成的扫掠图")
         except Exception as e:
             QMessageBox.warning(self, "出图失败", f"扫掠图生成失败：{e}")
-
-        if os.path.exists(_TMP_IMG):
-            pm = QPixmap(_TMP_IMG)
-            if not pm.isNull():
-                self._orig_pixmap = pm
-                self.img_label.setPixmap(pm.scaled(self.img_label.size(),
-                                                   Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            self._orig_pixmap = pm
+            self.img_label.setPixmap(pm.scaled(self.img_label.size(),
+                                               Qt.KeepAspectRatio, Qt.SmoothTransformation))
         self.set_status_badge("ok" if res.pass_ok else "ng")
         self._render_result(res)
 
@@ -457,14 +463,14 @@ class MainWindow(QMainWindow):
 
     # ================= 图片操作 =================
     def save_sweep_img(self):
-        if not os.path.exists(_TMP_IMG):
+        if self._orig_pixmap is None:
             QMessageBox.information(self, "提示", "请先运行检验生成扫掠图。")
             return
         path, _ = QFileDialog.getSaveFileName(self, "保存扫掠图", "sweep.png",
                                               "PNG 图片 (*.png)")
         if path:
-            pm = QPixmap(_TMP_IMG)
-            pm.save(path if path.endswith(".png") else path + ".png")
+            if not self._orig_pixmap.save(path if path.lower().endswith(".png") else path + ".png"):
+                QMessageBox.warning(self, "保存失败", "无法保存扫掠图。")
 
     def open_image_viewer(self):
         if self._orig_pixmap is None:
@@ -490,9 +496,7 @@ class MainWindow(QMainWindow):
         return d
 
     def unpack_model_data(self, d):
-        def setv(key, value):
-            if key in self.edits and isinstance(value, (int, float, str)):
-                self.edits[key].setText(str(value))
+        self.action_clear_result()
         for k, ed in self.edits.items():
             if k in d:
                 ed.setText(str(d[k]))
@@ -517,11 +521,7 @@ class MainWindow(QMainWindow):
             ed.setText("0.0")
         self.cmb_road.setCurrentText(ROAD_TYPES[0])
         self._sync_road_fields()
-        self.cur_result = None
-        self.set_status_badge("none")
-        self.text_result.clear()
-        self._orig_pixmap = None
-        self.img_label.clear()
+        self.action_clear_result()
         self.current_model_path = ""
 
     def action_open(self):
@@ -573,7 +573,8 @@ class MainWindow(QMainWindow):
 
     # ================= Word 导出（口令保护：EXPORT_PWD）=================
     def export_word(self):
-        if self.cur_result is None:
+        res = self.cur_result
+        if res is None:
             QMessageBox.information(self, "提示", "请先运行弯道检验，再生成报告。")
             return
         try:
@@ -592,14 +593,12 @@ class MainWindow(QMainWindow):
         if pwd != EXPORT_PWD:
             QMessageBox.warning(self, "口令错误", "导出口令不正确，已取消导出。")
             return
-        # 把当前表单输入挂到结果上，供报告“弯道输入参数”表读取
-        self.cur_result.user_meta = self.pack_model_data()
         from PyQt5.QtWidgets import QFileDialog
         path, _ = QFileDialog.getSaveFileName(self, "导出Word报告", "弯道检验报告.docx",
                                               "Word 文档 (*.docx)")
         if path:
             try:
-                assemble_and_save(self.cur_result, path)
+                assemble_and_save(res, path)
                 QMessageBox.information(self, "导出成功", f"报告已生成：{path}")
             except Exception as e:
                 QMessageBox.warning(self, "导出失败", f"{e}")

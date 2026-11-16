@@ -41,7 +41,7 @@ echo [INFO] Using: %PY%
 %PY% -V
 
 rem --- dependency self-check; only install when something is missing ---
-%PY% -c "import PyQt5, pydantic, shapely, docx, matplotlib" >nul 2>&1
+%PY% -c "import PyQt5, shapely, docx, matplotlib, numpy, scipy; from pydantic import model_validator" >nul 2>&1
 if errorlevel 1 (
     echo [INFO] Missing dependencies, installing via pip...
     %PY% -m pip install -r requirements.txt

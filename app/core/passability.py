@@ -226,27 +226,20 @@ def _vertical_check(bundle: InputBundle):
                f"侧壁、检修道与底缘净空未纳入本系统校核，需专项评估。")
         return ok, total_h, req, msg
 
-    if scenario == "ramp":
-        # 匝道：“不宜<0.5/不应<0.25”是外廓与护栏等设施之间的**横向预留**
-        # （非顶部竖向间隙），故顶部净空改用结构净空通用阈值。
-        req_min = VERT_CROSS_STRUCTURE["minimum"]
-        ok = gap >= req_min - _TOL
-        disp = ("宜（间隙≥0.10m）" if gap >= VERT_CROSS_STRUCTURE["desirable"] - _TOL
-                else "不应通行（间隙&lt;0.05m）")
-        msg = (f"匝道顶部净空：车货总高 {total_h:.3f} m，净空 {limit:.3f} m，"
-               f"顶部间隙 {gap:.3f} m，顶部按结构净空阈值判定{disp}；"
-               f"匝道外廓与护栏横向预留未纳入本系统校核，需专项评估。")
-        return ok, total_h, req_min, msg
-
-    # 跨线构造物 / 上跨桥：不宜 <0.1，不应 <0.05
+    # 跨线构造物、上跨桥和匝道顶部使用结构净空阈值。
     req_min = VERT_CROSS_STRUCTURE["minimum"]
     ok = gap >= req_min - _TOL
     if gap >= VERT_CROSS_STRUCTURE["desirable"] - _TOL:
         disp = "宜（间隙≥0.10m）"
-    elif gap >= req_min - _TOL:
+    elif ok:
         disp = "需采取措施（0.05≤间隙&lt;0.10m）"
     else:
         disp = "不应通行（间隙&lt;0.05m）"
+    if scenario == "ramp":
+        msg = (f"匝道顶部净空：车货总高 {total_h:.3f} m，净空 {limit:.3f} m，"
+               f"顶部间隙 {gap:.3f} m，顶部按结构净空阈值判定{disp}；"
+               "匝道外廓与护栏横向预留未纳入本系统校核，需专项评估。")
+        return ok, total_h, req_min, msg
     msg = (f"跨线净空：车货总高 {total_h:.3f} m，净空 {limit:.3f} m，"
            f"间隙 {gap:.3f} m，判定{disp}。")
     return ok, total_h, req_min, msg
@@ -409,7 +402,7 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
     hydraulic = _is_hydraulic(bundle)
 
     # —— 沿道路中心线半径行驶；受最大转向角约束 → 实际路径半径 R_path ——
-    r_target = max(r_in + lane / 2.0, 1.0)
+    r_target = r_in + lane / 2.0
     delta_used = math.atan(kin.wheelbase / r_target)
     delta_used = max(-kin.max_delta, min(kin.max_delta, delta_used))
     r_path = kin.wheelbase / math.tan(delta_used)   # 实际转弯半径（机械车）
@@ -421,11 +414,13 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
     b12 = None
     trajectory_source = "铰接尾随"
     sim_unstable = False          # 铰接尾随模型是否超出适用前提（车板长 ≥ 走行半径）
+    steering_ok = True
     if hydraulic:
         # —— 液压轴线挂车（B.1.2 闭式解口径）——
         # θ 由实际弯道半径反算(D9)：使瞬心偏距 base ≡ r_veh、R_min 恒为正，
         # 不再把"结构最大转角下的最紧转弯固有参数"套到实际弯道上。
         b12 = hydraulic_turn_radii(bundle, actual_turn_radius=r_veh)
+        steering_ok = b12["theta_required_deg"] <= b12["theta_max_deg"] + _TOL
         trajectory_source = "B.1.2"
         # 转弯通道宽度 W_z 取 B.1.2-1 轮迹带；扫空宽度 W_d 取 B.1.2-6。
         swept_w = b12["W_swept"]
@@ -488,13 +483,19 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         swept_ok = swept_w <= trans_w + _TOL
         pass_h = width_ok and swept_ok and outer_ok and inner_ok
         verdict = f"验算法判定{'通过' if pass_h else '不通过'}："
+    if not steering_ok:
+        pass_h = False
+        verdict = "所需转角超过挂车允许转角 → 不通过。"
+    elif sim_unstable:
+        pass_h = False
+        verdict = "走行半径超出铰接尾随模型适用范围 → 不通过。"
     res.metrics["method"] = method
     res.metrics["lookup"] = lookup
     res.metrics["road_width"] = road_w
     res.metrics["transverse_space_w"] = trans_w
 
     road_poly = _road_from_centerline(
-        r_veh, (lane / 2.0, lane / 2.0, lane / 2.0), _TURN_DEG)
+        r_target, (lane / 2.0, lane / 2.0, lane / 2.0), _TURN_DEG)
     res.road = road_poly
     res.swept = swept
     # 圆弧弯道绘图姿态：入弯前直行 1 + 弯道内 2 + 完全出弯后直行 1 = 4 辆
@@ -516,6 +517,7 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         "turn_channel_w": turn_channel_w,
         "trajectory_source": trajectory_source,
         "sim_unstable": sim_unstable,
+        "steering_ok": steering_ok,
     })
     # P2-问题7：货物外伸于挂车时增算货物前/后外侧扫空曲线（第六章公式）。
     # 映射（工程近似）：B=车货总宽、c1=货物横向间隙(同心取0)、L_f/L_a=货前/后外伸、
@@ -549,6 +551,7 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
         res.metrics["B1_2_spec_mode"] = b12["spec_mode"]
         res.metrics["B1_2_warnings"] = b12["warnings"]
         res.metrics["B1_2_theta_deg"] = b12["theta_deg"]
+        res.metrics["B1_2_theta_required_deg"] = b12["theta_required_deg"]
         res.metrics["B1_2_Wd"] = b12["W_swept"]
         res.metrics["B1_2_R_vehicle_in"] = b12["R_vehicle_in"]
         res.metrics["B1_2_R_vehicle_out"] = b12["R_vehicle_out"]
@@ -582,9 +585,9 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
             f"道路中心线半径 R<sub>veh</sub> = 道路内半径 + 车道宽/2 "
             f"= {r_in:.3f} + {lane / 2:.3f} = {r_veh:.3f} m",
             f"θ 按实际弯道半径反算：tanθ = s/(2·(R<sub>veh</sub>−d/2)) = "
-            f"{b12['d']:g}/(2×({r_veh:.3f}−{b12['track']:g}/2)) → θ = {b12['theta_deg']:g}°"
-            f"（s = 轴组跨度，d = 轮距；不超过挂车轴结构最大转角 "
-            f"{bundle.trailer.axle_max_steering_angle_deg:g}°）",
+            f"{b12['d']:g}/(2×({r_veh:.3f}−{b12['track']:g}/2))，"
+            f"所需转角 {b12['theta_required_deg']:.4f}°，允许转角 {b12['theta_max_deg']:g}°"
+            f" → {'满足' if steering_ok else '不满足'}",
             "板车刚体扫空量测（仅板车+货物，不含牵引车）：",
             f"车货外廓包络 = {_env_len:.3f} m（长）× {_env_w:.3f} m（宽）",
             f"扫空外径 R<sub>o</sub> = √[(R<sub>veh</sub>+包络宽/2)²+(包络长/2)²] "
@@ -596,8 +599,8 @@ def run_arc_scene(bundle: InputBundle) -> SweepScenarioResult:
     else:
         geom_lines = [
             "实际转弯半径（受最大转向角约束）：",
-            f"目标半径 R<sub>t</sub> = max(道路内半径 + 车道宽/2, 1) "
-            f"= max({r_in:.3f} + {lane / 2:.3f}, 1) = {r_target:.3f} m",
+            f"目标半径 R<sub>t</sub> = 道路内半径 + 车道宽/2 "
+            f"= {r_in:.3f} + {lane / 2:.3f} = {r_target:.3f} m",
             f"前轮转角 δ = arctan(轴距 / R<sub>t</sub>) = "
             f"arctan({kin.wheelbase:.3f} / {r_target:.3f}) = {math.degrees(delta_used):.2f}°"
             f"（限位 {math.degrees(kin.max_delta):.1f}°）",

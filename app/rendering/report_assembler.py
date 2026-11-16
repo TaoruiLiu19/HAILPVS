@@ -186,7 +186,7 @@ def _assemble_meta(res: SweepScenarioResult):
 
     此处保持与界面对齐：若未提供 bundle 元数据，则仅回填结果内可得信息。
     """
-    # 界面在 export 前已把输入元数据挂到 res.user_meta（dict）
+    # 界面在检验时把输入快照挂到 res.user_meta（dict）
     meta = getattr(res, "user_meta", None) or {}
     params = []
     mapping = [
