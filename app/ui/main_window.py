@@ -633,12 +633,12 @@ class MainWindow(QMainWindow):
                 title = line[1:-1]
                 anchor = f"step-{self.process_sections.count()}"
                 self.process_sections.addItem(title)
-                html.append(f"<h2 style='margin-top:22px;color:#18524d;'>"
+                html.append(f"<h2 style='margin-top:22px;color:#18447d;'>"
                             f"<a name='{anchor}'>{title}</a></h2>")
             else:
                 html.append(f"<p style='margin:0 0 6px;'>{colorize_verdict_html(line)}</p>")
         self.text_result.setHtml(
-            "<div style='font-size:11pt;color:#283d3a;line-height:1.5;'>"
+            "<div style='font-size:11pt;color:#283d59;line-height:1.5;'>"
             + "".join(html) + "</div>")
         self.process_sections.setCurrentRow(0)
 
