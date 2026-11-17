@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QSizePolicy,
     QVBoxLayout,
 )
@@ -163,3 +164,36 @@ class ImageViewerDialog(QDialog):
 
     def mouseDoubleClickEvent(self, event):
         self.accept()
+
+
+class Sweep3DDialog(QDialog):
+    """交互查看仿真生成的三维扫掠图。"""
+
+    def __init__(self, result, parent=None):
+        super().__init__(parent)
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+
+        from app.rendering.sweep_3d import OBLIQUE_VIEW, SIDE_VIEW, TOP_VIEW, build_3d_figure
+
+        self.setWindowTitle("三维扫掠预览")
+        geo = _primary_screen_geometry()
+        self.resize(min(1260, int(geo.width() * 0.92)), min(960, int(geo.height() * 0.9)))
+        figure, self.axes = build_3d_figure(result)
+        self.canvas = FigureCanvasQTAgg(figure)
+        self._initial_limits = (self.axes.get_xlim(), self.axes.get_ylim(), self.axes.get_zlim())
+        layout = QVBoxLayout(self)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("左键拖拽旋转 · 右键拖拽缩放"))
+        row.addStretch(1)
+        for title, angle in (("斜视", OBLIQUE_VIEW), ("俯视", TOP_VIEW), ("侧视", SIDE_VIEW)):
+            button = QPushButton(title)
+            button.clicked.connect(lambda checked=False, view=angle: self.set_view(view))
+            row.addWidget(button)
+        layout.addLayout(row)
+        layout.addWidget(self.canvas, 1)
+
+    def set_view(self, angle):
+        xlim, ylim, zlim = self._initial_limits
+        self.axes.set(xlim=xlim, ylim=ylim, zlim=zlim)
+        self.axes.view_init(*angle)
+        self.canvas.draw_idle()

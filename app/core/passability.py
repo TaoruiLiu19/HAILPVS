@@ -355,6 +355,8 @@ def _attach_common_checks(res: SweepScenarioResult, bundle: InputBundle,
     res.metrics["highway_grade"] = bundle.road.highway_grade
     res.metrics["turn_safe_clearance"] = TURN_SAFE_CLEARANCE
     res.metrics["total_height"] = total_h
+    res.metrics["deck_height"] = bundle.trailer.deck_height
+    res.metrics["tractor_height"] = bundle.tractor.height
     res.metrics["vert_clearance_ok"] = vert_ok
     res.metrics["vertical_clearance_gap"] = gap
     res.metrics["vertical_clearance_status"] = vertical_status

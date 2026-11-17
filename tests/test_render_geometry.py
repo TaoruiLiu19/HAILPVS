@@ -354,6 +354,41 @@ def test_mechanical_drawing_unchanged_no_axle_extension():
         matplotlib.pyplot.close(fig)
 
 
+@pytest.mark.parametrize("factory, hydraulic", [
+    (_failing_lookup_bundle, False),
+    (_hydraulic_arc_bundle, True),
+])
+def test_3d_uses_input_heights_and_vehicle_specific_artists(factory, hydraulic, monkeypatch):
+    from matplotlib.colors import to_hex
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection
+
+    from app.rendering import sweep_3d
+    from app.rendering.sweep_view import build_figure
+
+    bundle = factory()
+    bundle.trailer.deck_height = 1.37
+    bundle.cargo.height = 3.72
+    rendered_faces = []
+    poly_collection = sweep_3d.art3d.Poly3DCollection
+
+    class RecordingCollection(poly_collection):
+        def __init__(self, faces, **style):
+            rendered_faces.extend(faces)
+            super().__init__(faces, **style)
+
+    monkeypatch.setattr(sweep_3d.art3d, "Poly3DCollection", RecordingCollection)
+    fig, ax = build_figure(run_scene(bundle), style="3d")
+    assert ax.name == "3d"
+    heights = {round(z, 2) for face in rendered_faces for _, _, z in face}
+    assert 1.37 in heights and max(heights) == 5.09
+    labels = {label.get_text() for label in fig.legends[0].get_texts()}
+    assert ("转向轴及轮向" in labels) == hydraulic
+    assert ("牵引车平面轮廓" in labels) != hydraulic
+    assert any(isinstance(artist, Line3DCollection)
+               and to_hex(artist.get_colors()[0]) == sweep_3d._AXLE
+               for artist in ax.collections) == hydraulic
+
+
 @pytest.mark.parametrize("factory", [_hydraulic_arc_bundle, _right_angle_bundle])
 def test_band_annotation_does_not_overlap_vehicles(factory):
     # 扫掠宽度标注线（含引出到文字的段落）不得与已画车辆轮廓重叠

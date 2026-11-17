@@ -62,6 +62,7 @@ from .qtutil import _app_font, _primary_screen_geometry
 from .widgets import (
     ClickableImageLabel,
     ImageViewerDialog,
+    Sweep3DDialog,
     _make_form_group,
     _new_combo,
     _new_edit,
@@ -315,7 +316,8 @@ class MainWindow(QMainWindow):
         self.lbl_status.setMinimumWidth(61)
         title.addWidget(self.lbl_status)
         title.addStretch(1)
-        self.btn_preview = QPushButton("放大")
+        self.btn_preview = QPushButton()
+        self._update_preview_label()
         self.btn_preview.clicked.connect(self.open_image_viewer)
         self.btn_save_img = QPushButton("保存 PNG")
         self.btn_save_img.clicked.connect(self.save_sweep_img)
@@ -667,8 +669,12 @@ class MainWindow(QMainWindow):
             return
         self._plot_style = style
         self._settings.setValue("drawing/style", style)
+        self._update_preview_label()
         if self.cur_result is not None:
             self._render_sweep_preview()
+
+    def _update_preview_label(self):
+        self.btn_preview.setText("旋转查看" if self._plot_style == "3d" else "放大")
 
     def _render_sweep_preview(self):
         self._orig_pixmap = None
@@ -753,8 +759,14 @@ class MainWindow(QMainWindow):
     def open_image_viewer(self):
         if self._orig_pixmap is None:
             return
-        dlg = ImageViewerDialog(self._orig_pixmap, self)
-        dlg.exec_()
+        if self._plot_style == "3d":
+            dialog = Sweep3DDialog(self.cur_result, self)
+        else:
+            dialog = ImageViewerDialog(self._orig_pixmap, self)
+        try:
+            dialog.exec_()
+        finally:
+            dialog.deleteLater()
 
     # ================= 模型持久化 =================
     def pack_model_data(self):

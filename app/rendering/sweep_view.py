@@ -16,13 +16,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.offsetbox import AnchoredText
-from matplotlib.patches import Arc, Patch, PathPatch
-from matplotlib.path import Path
+from matplotlib.patches import Arc, Patch
 from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
-from shapely.geometry.polygon import orient
 
 from config import PLOT_DPI
 from ..core.passability import SweepScenarioResult
+from .plot_geometry import polygon_patches
+from .sweep_3d import build_3d_figure
 
 # —— CAD 风格配色：白底 / 黑主结构 / 蓝构件与构造线 / 红关键点 ——
 ROAD_COLOR = "#111111"        # 道路边界：黑色粗实线
@@ -37,7 +37,7 @@ SPINE_COLOR = "#b8c0c8"       # 坐标轴细线：浅灰
 AXLE_COLOR = "#7b3fe4"        # 液压车轴段/转向轮：紫色（区别于机械车黑色轮廓）
 CARGO_SWEPT_COLOR = "#2f9e44"  # 货物扫空曲线（R_sf/R_sa/r_s，货物外伸时）：绿色短划线，区别于车辆扫掠灰线
 OVERRUN_COLOR = "#c53030"
-PLOT_STYLES = {"overview": "工程总览", "classic": "经典标注"}
+PLOT_STYLES = {"overview": "工程总览", "classic": "经典标注", "3d": "三维扫掠"}
 
 # 构造弧(扫掠 R_o/R_i)相对道路边界的向内留隙(m)：避免半径弧贴近/压过内缘线
 _SWEPT_ARC_INSET = 0.5
@@ -64,20 +64,10 @@ def _draw_overrun(ax, geometry):
 
 
 def _draw_polygons(ax, geometry, **style):
-    if geometry is None or geometry.is_empty:
-        return False
-    polygons = [geometry] if geometry.geom_type == "Polygon" else getattr(geometry, "geoms", ())
-    drawn = False
-    for polygon in polygons:
-        if polygon.geom_type != "Polygon":
-            continue
-        rings = list(_iter_geometries(orient(polygon)))
-        points = [point for ring in rings for point in ring]
-        codes = [code for ring in rings for code in
-                 [Path.MOVETO] + [Path.LINETO] * (len(ring) - 2) + [Path.CLOSEPOLY]]
-        ax.add_patch(PathPatch(Path(points, codes), **style))
-        drawn = True
-    return drawn
+    patches = list(polygon_patches(geometry, **style))
+    for patch in patches:
+        ax.add_patch(patch)
+    return bool(patches)
 
 
 def _extents(*geoms):
@@ -946,6 +936,8 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10), *, style="classic")
         return _build_overview(res, figsize)
     if style == "classic":
         return _build_classic(res, figsize)
+    if style == "3d":
+        return build_3d_figure(res, figsize)
     raise ValueError(f"未知绘图风格：{style}")
 
 
