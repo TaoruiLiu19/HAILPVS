@@ -1,4 +1,4 @@
-"""扫掠轨迹工程图绘制（CAD 线框风格）。
+"""扫掠轨迹工程图绘制（工程总览与经典标注）。
 
 对标参考工程图：
   - 白底线框，路口越界区域单独着色；
@@ -14,8 +14,11 @@ import math
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.offsetbox import AnchoredText
 from matplotlib.patches import Arc, Patch, PathPatch
 from matplotlib.path import Path
+from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
 from shapely.geometry.polygon import orient
 
 from config import PLOT_DPI
@@ -34,6 +37,7 @@ SPINE_COLOR = "#b8c0c8"       # 坐标轴细线：浅灰
 AXLE_COLOR = "#7b3fe4"        # 液压车轴段/转向轮：紫色（区别于机械车黑色轮廓）
 CARGO_SWEPT_COLOR = "#2f9e44"  # 货物扫空曲线（R_sf/R_sa/r_s，货物外伸时）：绿色短划线，区别于车辆扫掠灰线
 OVERRUN_COLOR = "#c53030"
+PLOT_STYLES = {"overview": "工程总览", "classic": "经典标注"}
 
 # 构造弧(扫掠 R_o/R_i)相对道路边界的向内留隙(m)：避免半径弧贴近/压过内缘线
 _SWEPT_ARC_INSET = 0.5
@@ -55,6 +59,11 @@ def _iter_geometries(geom):
 
 
 def _draw_overrun(ax, geometry):
+    return _draw_polygons(ax, geometry, facecolor=OVERRUN_COLOR,
+                          edgecolor=OVERRUN_COLOR, alpha=0.28, zorder=1)
+
+
+def _draw_polygons(ax, geometry, **style):
     if geometry is None or geometry.is_empty:
         return False
     polygons = [geometry] if geometry.geom_type == "Polygon" else getattr(geometry, "geoms", ())
@@ -66,8 +75,7 @@ def _draw_overrun(ax, geometry):
         points = [point for ring in rings for point in ring]
         codes = [code for ring in rings for code in
                  [Path.MOVETO] + [Path.LINETO] * (len(ring) - 2) + [Path.CLOSEPOLY]]
-        ax.add_patch(PathPatch(Path(points, codes), facecolor=OVERRUN_COLOR,
-                               edgecolor=OVERRUN_COLOR, alpha=0.28, zorder=1))
+        ax.add_patch(PathPatch(Path(points, codes), **style))
         drawn = True
     return drawn
 
@@ -112,11 +120,11 @@ def _view_extents(ax, *geoms):
     return minx, maxx, miny, maxy
 
 
-def _plot_ring(ax, coords, color, lw, ls="-"):
+def _plot_ring(ax, coords, color, lw, ls="-", *, zorder=None):
     """闭合折线绘制（首尾相连），供道路/车辆/包络环共用。"""
     xs = [c[0] for c in coords] + [coords[0][0]]
     ys = [c[1] for c in coords] + [coords[0][1]]
-    ax.plot(xs, ys, color=color, linewidth=lw, linestyle=ls)
+    ax.plot(xs, ys, color=color, linewidth=lw, linestyle=ls, zorder=zorder)
 
 
 def _crosshair(ax, x, y, arm=1.8):
@@ -175,7 +183,7 @@ def _rotated_rect(cx, cy, ang, half_len, half_wid):
 
 
 def _plot_steered_axle(ax, cx, cy, psi, delta_deg, half_track, n_tires=8,
-                       color=AXLE_COLOR):
+                       color=AXLE_COLOR, *, zorder=None):
     """绘制液压车一根轴：轴段 + 两侧按 δ 偏转的多轮胎实体（第六章图式）。
 
     cx/cy 为轴中点；psi 为车板航向；delta_deg 为该轴转向角（首/末朝瞬心偏转、
@@ -188,7 +196,7 @@ def _plot_steered_axle(ax, cx, cy, psi, delta_deg, half_track, n_tires=8,
     # 轴段：垂直于车板纵轴
     ax.plot([cx - nx * half_track, cx + nx * half_track],
             [cy - ny * half_track, cy + ny * half_track],
-            color=color, linewidth=1.0, zorder=4)
+            color=color, linewidth=1.0, zorder=4 if zorder is None else zorder)
     da = math.radians(delta_deg)
     # 每侧轮胎数；沿轴横向均布以 fit 轮距
     per_side = int(n_tires) // 2
@@ -205,7 +213,7 @@ def _plot_steered_axle(ax, cx, cy, psi, delta_deg, half_track, n_tires=8,
             # 使矩形随航向畸变、ψ=90/270° 时退化为零面积线段）
             corners = _rotated_rect(wx, wy, psi + da, tire_len / 2.0,
                                     tire_wid / 2.0)
-            _plot_ring(ax, corners, color, 1.0)
+            _plot_ring(ax, corners, color, 1.0, zorder=zorder)
 
 
 def _annotate_radius(ax, center, radius, span_deg, label, side, road=None,
@@ -413,15 +421,11 @@ def _hydraulic_front_anchor(trailer_geom, frame0, frame1, heading=None):
     return (c.x + ux * (half_len + 0.5), c.y + uy * (half_len + 0.5))
 
 
-def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
-    """构建扫掠工程图的 (fig, ax)，不保存、不关闭（供测试检视图元）。
-
-    `draw_sweep_view` 只是本函数的"保存并关闭"封装。
-    """
+def _build_classic(res: SweepScenarioResult, figsize):
+    """原 CAD 标注图，保留半径、车货尺寸和液压转向轴标注。"""
     fig, ax = plt.subplots(figsize=figsize)
     ax.set_facecolor("white")
     scene = getattr(res, "scene", "arc")
-    pass_ok = bool(res.pass_ok)
     metrics = res.metrics
     direction = metrics.get("turn_direction")
 
@@ -604,10 +608,8 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
                             f"交角 {turn_deg:.0f}°", start_deg=90.0)
 
     # Layer 5: 检验结论 + 图例（左下角）
-    from matplotlib.lines import Line2D
-    verdict = "通过" if pass_ok else "不通过"
-    vc = "#2f855a" if pass_ok else "#c53030"
-    info_lines = [f"检验结论：{verdict}" + (f"（{direction}）" if direction else "")]
+    vc = "#80551b" if res.pending else "#2f855a" if res.pass_ok else "#c53030"
+    info_lines = [f"检验结论：{res.verdict}" + (f"（{direction}）" if direction else "")]
     if scene == "arc":
         info_lines.append(f"判定依据：{metrics.get('method', '验算法')}")
         if metrics.get("lookup") == "pass":
@@ -639,6 +641,8 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
                                   f"最大侵入 {metrics[f'{key}_depth']:.3f} m")
     if metrics.get("vert_clearance_ok") is False:
         info_lines.append("垂直净空不足")
+    elif metrics.get("vertical_clearance_status") == "待核实":
+        info_lines.append("顶部净空待核实")
     if metrics.get("ok") is False:
         info_lines.append("横向稳定性不满足")
     info = "\n".join(info_lines)
@@ -720,13 +724,239 @@ def build_figure(res: SweepScenarioResult, figsize=(12, 10)):
     return fig, ax
 
 
+_OV_INK = "#19334f"
+_OV_MUTED = "#526981"
+_OV_ROAD = "#edf0f4"
+_OV_BORDER = "#718498"
+_OV_SWEPT = "#c1ddf5"
+_OV_SWEEP_EDGE = "#578cc3"
+_OV_CARGO = "#146b5d"
+_OV_TOLERANCE = "#967246"
+_OV_FONT = "Microsoft YaHei"
+
+
+def _draw_overview_poses(ax, res):
+    for frame in res.vehicle_frames:
+        _, _, body, deck, cargo = frame[:5]
+        _draw_polygons(ax, deck, facecolor="white", edgecolor=_OV_INK,
+                       linewidth=1.4, zorder=5)
+        _draw_polygons(ax, cargo, facecolor="#e3f4ec", edgecolor=_OV_CARGO,
+                       linewidth=1.0, alpha=0.7, zorder=6)
+        if not res.hydraulic and body.geom_type == "MultiPolygon":
+            _draw_polygons(ax, body.geoms[-1], facecolor=_OV_INK, edgecolor=_OV_INK,
+                           linewidth=1.2, alpha=0.80, zorder=7)
+        if res.hydraulic and len(frame) > 5 and frame[5]:
+            axle = frame[5]
+            for _, x, y, turn, half_track, _ in axle["axles"]:
+                _plot_steered_axle(ax, x, y, axle["psi"], turn, half_track,
+                                   n_tires=axle["n_tires"], zorder=7)
+
+
+def _draw_travel_direction(ax, res):
+    path = res.travel_path
+    if len(path) < 2:
+        return
+    xs, ys = zip(*path)
+    ax.plot(xs, ys, color=_OV_INK, lw=1.1, ls=(0, (3, 3)), zorder=4)
+    for fraction in (0.14, 0.48, 0.84):
+        end = min(len(path) - 1, max(1, round(fraction * (len(path) - 1))))
+        start = max(0, end - max(1, round(len(path) * 0.055)))
+        ax.annotate("", xy=path[end], xytext=path[start], zorder=8,
+                    arrowprops=dict(arrowstyle="-|>", color=_OV_INK, lw=1.6,
+                                    mutation_scale=18, shrinkA=0, shrinkB=0))
+
+
+def _overview_callout(ax, point, label, color):
+    xlo, xhi = ax.get_xlim()
+    ylo, yhi = ax.get_ylim()
+    dx = 16 if (point[0] - xlo) / (xhi - xlo) < 0.62 else -16
+    dy = 21 if point[1] < ylo + (yhi - ylo) * 0.67 else -22
+    ax.annotate(label, xy=point, xytext=(dx, dy), textcoords="offset points",
+                ha="left" if dx > 0 else "right", va="bottom" if dy > 0 else "top",
+                color=color, fontsize=13, family=_OV_FONT, zorder=11,
+                bbox=dict(boxstyle="round,pad=.35", fc="white", ec=color, lw=0.8),
+                arrowprops=dict(arrowstyle="-", color=color, lw=1.0))
+
+
+def _overview_arc_clearance(ax, res):
+    m = res.metrics
+    if m["sim_unstable"]:
+        return
+    side = min(("inner", "outer"), key=lambda edge: m[f"clearance_{edge}"])
+    inner = side == "inner"
+    swept_radius = m["R_i"] if inner else m["R_o"]
+    road_radius = m["road_outer"] - (m["road_lane"] if inner else 0)
+    center = m["turn_center"]
+    turn = m["turn_deg"]
+    angle = _band_angle_avoiding(res.vehicle_frames, center, m["R_i"], m["R_o"], turn)
+    angle = math.radians(angle if angle is not None else turn / 2)
+    dx, dy = math.cos(angle), math.sin(angle)
+    sweep = (center[0] + swept_radius * dx, center[1] + swept_radius * dy)
+    road = (center[0] + road_radius * dx, center[1] + road_radius * dy)
+    color = _OV_INK if m[f"{side}_clearance_ok"] else OVERRUN_COLOR
+    ax.plot((sweep[0], road[0]), (sweep[1], road[1]), color=color, lw=2.2,
+            marker="o", markersize=3.8, zorder=9)
+    edge = "内缘" if inner else "外缘"
+    _overview_callout(ax, road, f"{edge}稳态净空 {m[f'clearance_{side}']:.3f} m\n"
+                               f"要求 ≥ {m['sigma']:.2f} m", color)
+
+
+def _overview_right_angle(ax, res):
+    m = res.metrics
+    handles = []
+    candidates = []
+    for key, label, overrun in (("vehicle", "车辆", res.vehicle_overrun),
+                                ("cargo", "货物", res.cargo_overrun)):
+        ok = m[f"split_{key}_ok"]
+        hatch = "..." if ok else "////"
+        color = _OV_TOLERANCE if ok else OVERRUN_COLOR
+        fill = "#faeddb" if ok else "#fae0e0"
+        if _draw_polygons(ax, overrun, facecolor=fill, edgecolor=color,
+                          hatch=hatch, linewidth=1.1, zorder=9 if ok else 10):
+            handle_label = "容差内侵入" if ok else "超限区域"
+            if not any(handle.get_label() == handle_label for handle in handles):
+                handles.append(Patch(fc=fill, ec=color, hatch=hatch, label=handle_label))
+        point = m.get(f"{key}_depth_point")
+        if point is not None:
+            candidates.append((not ok, m[f"{key}_depth"], point, label, color))
+    if candidates:
+        failed, depth, point, label, color = max(candidates, key=lambda item: item[:2])
+        ax.plot(*point, marker="D" if failed else "o", mfc="white", mec=color,
+                ms=6, mew=1.5, zorder=11)
+        suffix = "" if failed else "（容差内）"
+        _overview_callout(ax, point, f"{label}最大侵入 {depth:.3f} m{suffix}", color)
+    return handles
+
+
+def _overview_footer(fig, res):
+    m = res.metrics
+    if res.scene == "arc":
+        width_label = "通道宽度（参考）" if m["lookup"] == "pass" else "转弯通道宽度"
+        width_value = f"{m['turn_channel_w']:.3f} m"
+        if m["sim_unstable"]:
+            detail_label, detail_value = "轨迹校核", "超出铰接模型适用范围"
+        elif not m["steering_ok"]:
+            detail_label, detail_value = "挂车转向", "所需转角超限"
+        else:
+            detail_label = "最小稳态横向净空"
+            detail_value = f"{min(m['clearance_inner'], m['clearance_outer']):.3f} m"
+    else:
+        width_label, width_value = "所需净宽", f"{m['required_w']:.3f} m"
+        keys = ("section_net_w", "lturn_net_w") if m["turn_direction"] == "左转" else (
+            "entry_net_w", "exit_net_w")
+        detail_label, detail_value = "最小可用净宽", f"{min(m[key] for key in keys):.3f} m"
+    gap = m["vertical_clearance_gap"]
+    for x, label, value in ((0.055, width_label, width_value),
+                            (0.34, detail_label, detail_value)):
+        fig.text(x, 0.113, label, color=_OV_MUTED, fontsize=13, family=_OV_FONT)
+        fig.text(x, 0.073, value, color=_OV_INK, fontsize=18, family=_OV_FONT, weight="bold")
+    if gap is None:
+        fig.text(0.68, 0.113, "顶部净空", color=_OV_MUTED, fontsize=13, family=_OV_FONT)
+        fig.text(0.68, 0.073, m["vertical_clearance_status"], color=_OV_INK,
+                 fontsize=18, family=_OV_FONT, weight="bold")
+    else:
+        total = m["total_height"]
+        section = fig.add_axes((0.68, 0.048, 0.06, 0.078), xlim=(0, 1), ylim=(0, 1))
+        section.axis("off")
+        section.fill_between((0.17, 0.83), 0.09, 0.60, fc=_OV_SWEPT, ec=_OV_SWEEP_EDGE)
+        section.plot((0.02, 0.98), (0.07, 0.07), color=_OV_BORDER, lw=1.4)
+        color = _OV_INK if m["vert_clearance_ok"] else OVERRUN_COLOR
+        roof = 0.90 if gap > 0 else 0.60 if gap == 0 else 0.47
+        section.plot((0.02, 0.98), (roof, roof), color=_OV_BORDER, lw=1.4, zorder=4)
+        if gap < 0:
+            section.fill_between((0.17, 0.83), roof, 0.60, fc="#fae0e0", ec=color,
+                                 hatch="///", zorder=3)
+        elif gap > 0:
+            section.annotate("", (0.50, roof), (0.50, 0.61),
+                             arrowprops=dict(arrowstyle="<->", color=color, shrinkA=0, shrinkB=0))
+        fig.text(0.755, 0.113, "顶部间隙（剖面示意）", color=_OV_MUTED, fontsize=12, family=_OV_FONT)
+        fig.text(0.755, 0.080, f"{gap:.3f} m", color=color, fontsize=18,
+                 family=_OV_FONT, weight="bold")
+        fig.text(0.755, 0.052, f"净空 {total + gap:.2f} m / 总高 {total:.2f} m",
+                 color=_OV_MUTED, fontsize=11, family=_OV_FONT)
+
+
+def _build_overview(res, figsize):
+    fig = plt.figure(figsize=figsize, facecolor="white")
+    ax = fig.add_axes((0.05, 0.24, 0.90, 0.65))
+    ax.set_aspect("equal", "box")
+    ax.set_axis_off()
+    m = res.metrics
+    scenario = "圆弧弯道" if res.scene == "arc" else f"直角弯道 · {m['turn_direction']}"
+    scope = "液压轴线板车 · 全轮转向（板车及货物）" if res.hydraulic else "机械挂车 · 牵引车与挂车铰接尾随"
+    fig.text(0.055, 0.959, f"{scenario}  /  扫掠总览", color=_OV_INK,
+             family=_OV_FONT, fontsize=25, weight="bold", va="top")
+    fig.text(0.055, 0.905, scope, color=_OV_MUTED, family=_OV_FONT, fontsize=15, va="top")
+    badge_color = "#80551b" if res.pending else "#23664d" if res.pass_ok else OVERRUN_COLOR
+    fig.text(0.942, 0.945, res.verdict, color=badge_color, family=_OV_FONT, fontsize=16,
+             weight="bold", ha="right", va="top",
+             bbox=dict(boxstyle="round,pad=.43", fc="#f3f6fa", ec="none"))
+
+    _draw_polygons(ax, res.road, facecolor=_OV_ROAD, edgecolor="none", zorder=1)
+    _draw_polygons(ax, res.swept, facecolor=_OV_SWEPT, edgecolor=_OV_SWEEP_EDGE,
+                   linewidth=1.0, zorder=2)
+    _draw_polygons(ax, res.road, facecolor="none", edgecolor=_OV_BORDER,
+                   linewidth=1.4, zorder=3)
+    handles = [
+        Patch(fc=_OV_ROAD, ec=_OV_BORDER, label="道路边界"),
+        Patch(fc=_OV_SWEPT, ec=_OV_SWEEP_EDGE,
+              label="板车及货物扫掠" if res.hydraulic else "车货扫掠范围"),
+        Line2D([0], [0], color=_OV_INK, ls="--", marker=">", label="行驶方向"),
+    ]
+    if _draw_polygons(ax, res.cargo_sweep, facecolor="none", edgecolor=_OV_CARGO,
+                      linestyle="--", linewidth=1.3, zorder=4):
+        handles.append(Line2D([0], [0], color=_OV_CARGO, ls="--", label="外伸货物扫掠"))
+    if res.hydraulic:
+        handles.append(Line2D([0], [0], color=AXLE_COLOR, lw=1.5, label="液压转向轮"))
+    else:
+        handles.append(Patch(fc=_OV_INK, ec=_OV_INK, alpha=0.8, label="牵引车"))
+    _draw_travel_direction(ax, res)
+    _draw_overview_poses(ax, res)
+
+    x0, x1, y0, y1 = _extents(res.road, res.swept)
+    pad = 0.06 * max(x1 - x0, y1 - y0)
+    ax.set_xlim(x0 - pad, x1 + pad)
+    ax.set_ylim(y0 - pad, y1 + pad)
+    if m.get("turn_direction") == "右转":
+        ax.invert_xaxis()
+    if res.scene == "arc":
+        _overview_arc_clearance(ax, res)
+    elif m.get("split_error"):
+        note = AnchoredText("扫掠越界校核未完成", loc="upper left", frameon=False,
+                            prop=dict(family=_OV_FONT, color=OVERRUN_COLOR, size=13))
+        ax.add_artist(note)
+    else:
+        handles += _overview_right_angle(ax, res)
+    span = max(x1 - x0, y1 - y0)
+    scale = 20 if span >= 100 else 10 if span >= 50 else 5
+    ax.add_artist(AnchoredSizeBar(ax.transData, scale, f"{scale} m", "lower left",
+                                  pad=.4, sep=4, frameon=False, color=_OV_INK,
+                                  fontproperties=dict(family=_OV_FONT, size=12)))
+    fig.legend(handles=handles, loc="lower left", bbox_to_anchor=(.049, .157),
+               ncol=min(len(handles), 6), frameon=False, prop=dict(family=_OV_FONT, size=12))
+    fig.add_artist(Line2D([.055, .945], [.147, .147], transform=fig.transFigure,
+                          color="#d5e0ed", lw=1.0))
+    _overview_footer(fig, res)
+    return fig, ax
+
+
+def build_figure(res: SweepScenarioResult, figsize=(12, 10), *, style="classic"):
+    """构建指定风格的 (fig, ax)，供预览和各导出入口共用。"""
+    if style == "overview":
+        return _build_overview(res, figsize)
+    if style == "classic":
+        return _build_classic(res, figsize)
+    raise ValueError(f"未知绘图风格：{style}")
+
+
 def draw_sweep_view(res: SweepScenarioResult, out_path, dpi=PLOT_DPI,
-                    figsize=(12, 10)):
-    """绘制 CAD 线框风格扫掠工程图，保存到路径或二进制流。"""
-    fig, _ = build_figure(res, figsize)
+                    figsize=(12, 10), *, style="classic"):
+    """保存指定风格的扫掠图到路径或 PNG 二进制流。"""
+    fig, _ = build_figure(res, figsize, style=style)
     try:
-        fig.tight_layout()
-        fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+        if style == "classic":
+            fig.tight_layout()
+        fig.savefig(out_path, dpi=dpi, bbox_inches="tight" if style == "classic" else None)
     finally:
         plt.close(fig)
     return out_path

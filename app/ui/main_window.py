@@ -1,118 +1,126 @@
-"""主窗口：工况配置、扫掠图和检验结论。
-
-字段表单与 Pydantic 数据模型(InputBundle)一一对应；点击“运行检验”后：
-  采集表单 → 构建 InputBundle → run_scene 仿真 → draw_sweep_view 出图
-  → 右侧展示扫掠图 + 通过性结论；并支持模型保存/打开(JSON 持久化)。
-"""
-import os
+"""主工作台：并排展示工况、扫掠图及逐项计算过程。"""
 import datetime
+import os
 from io import BytesIO
 from pathlib import Path
 
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton, QFileDialog,
-                             QVBoxLayout, QHBoxLayout, QGridLayout, QTabWidget, QListWidget,
-                             QScrollArea, QFrame, QTextBrowser, QWidget,
-                             QMessageBox)
-from PyQt5.QtCore import Qt, QUrl
-from PyQt5.QtGui import QKeySequence, QPixmap
+from PyQt5.QtCore import QSettings, QSignalBlocker, Qt, QUrl
+from PyQt5.QtGui import QKeySequence, QPixmap, QTextOption
+from PyQt5.QtWidgets import (
+    QActionGroup,
+    QApplication,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSplitter,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
+)
 
-from config import (APP_NAME, APP_VERSION, ROAD_TYPES, TRAILER_TYPES,
-                    ACCEPTANCE_NOTE, EXPORT_PWD, MODEL_SUFFIX,
-                    HIGHWAY_GRADES, HYDRAULIC_AXLE_DEFAULT_STEER_DEG)
+from config import (
+    ACCEPTANCE_NOTE,
+    APP_NAME,
+    APP_VERSION,
+    EXPORT_PWD,
+    HIGHWAY_GRADES,
+    HYDRAULIC_AXLE_DEFAULT_STEER_DEG,
+    MODEL_SUFFIX,
+    ROAD_TYPES,
+    TRACTOR_SWING_EXIT_FACTOR,
+    TRAILER_TYPES,
+    VERT_SCENARIO,
+)
+
 try:
     from config import PAD_ITEMS
 except ImportError:
     PAD_ITEMS = ["干燥的木板", "干燥的橡胶垫", "潮湿的木板", "潮湿的橡胶垫"]
 
-from app.core.datamodel import (InputBundle, CargoParams, TrailerParams, TractorParams,
-                                RoadParams, ArcCorner, RightAngleCorner)
+from app.core.datamodel import (
+    ArcCorner,
+    CargoParams,
+    InputBundle,
+    RightAngleCorner,
+    RoadParams,
+    TractorParams,
+    TrailerParams,
+)
 from app.core.passability import run_scene
-from app.rendering.sweep_view import draw_sweep_view
+from app.model.project import ensure_suffix, load_model, save_model
+from app.rendering.sweep_view import PLOT_STYLES, draw_sweep_view
 from app.rendering.verdict_style import colorize_verdict_html
-from app.model.project import save_model, load_model, ensure_suffix
-from .qtutil import _app_font, _primary_screen_geometry
-from .workspace_style import workspace_stylesheet
-from .widgets import (_make_form_group, _row_label, _new_combo, _new_edit,
-                      ClickableImageLabel)
 
-# ===== 窗体左侧输入表单的字段定义：控件键 → (标签, Pydantic 字段) =====
-# 键前缀区分货物(c_)/挂车(t_)/牵引车(tr_)，避免 length/width 等重名覆盖。
-# 仅保留参与几何/判定运算的参数；仅存档展示项不再作为输入。
+from .qtutil import _app_font, _primary_screen_geometry
+from .widgets import (
+    ClickableImageLabel,
+    ImageViewerDialog,
+    _make_form_group,
+    _new_combo,
+    _new_edit,
+    _row_label,
+)
+from .workspace_style import workspace_stylesheet
+
 _CARGO_FIELDS = [
-    ("货物长度(m)", "c_length", "length", True),
-    ("货物宽度(m)", "c_width", "width", True),
-    ("货物高度(m)", "c_height", "height", True),
-    ("重心高度(m)", "c_cg_height", "cg_height", True),
+    ("货物长度 (m)", "c_length", ""),
+    ("货物宽度 (m)", "c_width", ""),
+    ("货物高度 (m)", "c_height", ""),
 ]
 _TRAILER_FIELDS = [
-    ("挂车长度(m)", "t_length", "length", True),
-    ("挂车宽度(m)", "t_width", "width", True),
-    ("车板上表面离地高度(m)", "t_deck_height", "deck_height", True),
-    ("挂车轴数", "t_axle_count", "axle_count", True),
-    ("挂车轴距(m)", "t_axle_spacing", "axle_spacing", True),
-    ("轮距(m)", "t_track_width", "track_width", True),
-    ("牵引销至转动中心轴 (m)", "t_kingpin_to_axle", "kingpin_to_axle", False),
-]
-# 仅液压轴线挂车显示的参数（选挂车类型=液压后整组可见）；标签不带“(液压)”后缀。
-# 连接方式/连接部分长度为纯绘图参数且当前渲染路径未使用，不再提供输入（模型默认 0/鹅颈）。
-_HYDRAULIC_TRAILER_FIELDS = [
-    ("每轴最大转向角(°)", "t_axle_steer_deg", "axle_max_steering_angle_deg", True),
+    ("挂车长度 (m)", "t_length", ""),
+    ("挂车宽度 (m)", "t_width", ""),
+    ("车板离地高 (m)", "t_deck_height", ""),
+    ("挂车轮距 (m)", "t_track_width", ""),
+    ("牵引销至轴组中心 (m)", "t_kingpin_to_axle", ""),
+    ("轴线数", "t_axle_count", ""),
+    ("相邻轴线间距 (m)", "t_axle_spacing", ""),
+    ("每轴最大转向角 (°)", "t_axle_steer_deg", str(HYDRAULIC_AXLE_DEFAULT_STEER_DEG)),
 ]
 _TRACTOR_FIELDS = [
-    ("牵引车轴距(m)", "tr_wheelbase", "wheelbase", True),
-    ("最大转向角(°)", "tr_max_steering_angle_deg", "max_steering_angle_deg", True),
-    ("牵引车宽度(m)", "tr_width", "width", True),
-    ("牵引车前轮轮距 (m)", "tr_track_width", "track_width", False),
-    ("鞍座至后轴距离(m)", "tr_fifth_wheel_pos", "fifth_wheel_pos", True),
+    ("牵引车轴距 (m)", "tr_wheelbase", ""),
+    ("最大转向角 (°)", "tr_max_steering_angle_deg", ""),
+    ("牵引车宽度 (m)", "tr_width", ""),
+    ("前轮轮距 (m)", "tr_track_width", ""),
+    ("鞍座至后轴距离 (m)", "tr_fifth_wheel_pos", "0.0"),
 ]
 _ARC_FIELDS = [
-    ("道路外半径(m)", "outer_radius", True),
-    ("车道宽度(m)", "lane_width", True),
+    ("道路外半径 (m)", "outer_radius", ""),
+    ("车道宽度 (m)", "lane_width", ""),
 ]
 _RIGHT_FIELDS = [
-    ("入口宽度(m)", "entry_width", True),
-    ("出口宽度(m)", "exit_width", True),
-    ("弯道内半径(m)", "corner_radius", True),
-    ("左转物理区可通行宽 (m)", "W_section", False),
-    ("左转处可通行宽 (m)", "W_lturn", False),
-    # 交角固定为 90°（直角弯道），不再提供输入
+    ("入口宽度 (m)", "entry_width", ""),
+    ("出口宽度 (m)", "exit_width", ""),
+    ("内角半径 (m)", "corner_radius", "0.0"),
+    ("左转物理区可用宽 (m)", "W_section", ""),
+    ("左转处可用宽 (m)", "W_lturn", ""),
 ]
-_OPTIONAL_INPUTS = ("t_kingpin_to_axle", "tr_track_width", "superelevation", "combined_cg_height")
+_STABILITY_FIELDS = [
+    ("最高行驶速度 (km/h)", "max_speed_kmh", "10.0"),
+    ("弯道超高率", "superelevation", ""),
+    ("车货重心离地高 (m)", "combined_cg_height", ""),
+    ("货物重心离板高 (m)", "c_cg_height", ""),
+]
+_OPTIONAL_HINTS = {
+    "t_kingpin_to_axle": "默认挂车长度",
+    "tr_track_width": "默认牵引车宽",
+    "superelevation": "默认 0.02",
+    "combined_cg_height": "留空时估算",
+    "c_cg_height": "默认 0",
+    "W_section": "默认入口宽度",
+    "W_lturn": "默认出口宽度",
+}
+_CLEARANCE_MODES = {"unknown": "情况待确认", "open": "上方开敞", "obstacle": "有顶部障碍"}
 _EMPTY_PREVIEW = "运行弯道检验后，扫掠图将在此显示"
 _DOCS = Path(__file__).resolve().parents[2] / "docs"
 _STANDARD_URL = "https://xxgk.mot.gov.cn/jigou/glj/202310/t20231008_3924626.html"
-
-
-class ParameterGrid(QWidget):
-    """按可用宽度在两列和三列之间切换，保留所有表单控件状态。"""
-
-    def __init__(self, columns):
-        super().__init__()
-        self.columns = columns
-        self.grid = QGridLayout(self)
-        self.grid.setContentsMargins(2, 2, 9, 3)
-        self.grid.setSpacing(16)
-        self._wide = None
-        self._reflow(False)
-
-    def _reflow(self, wide):
-        if wide == self._wide:
-            return
-        self._wide = wide
-        for column in self.columns:
-            self.grid.removeWidget(column)
-        for index, column in enumerate(self.columns):
-            if not wide and index == 2:
-                self.grid.addWidget(column, 1, 0, 1, 2)
-            else:
-                self.grid.addWidget(column, 0, index)
-        self.grid.setColumnStretch(0, 1)
-        self.grid.setColumnStretch(1, 1)
-        self.grid.setColumnStretch(2, 1 if wide else 0)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._reflow(event.size().width() >= 1010)
 
 
 class MainWindow(QMainWindow):
@@ -121,6 +129,7 @@ class MainWindow(QMainWindow):
         "running": ("检验中", "#e0f1f8", "#12617e"),
         "ok": ("通过", "#e2f5ec", "#126047"),
         "ng": ("不通过", "#fce9ea", "#a12435"),
+        "pending": ("待核实", "#fff3db", "#80551b"),
     }
 
     def __init__(self):
@@ -133,21 +142,35 @@ class MainWindow(QMainWindow):
         self.init_data()
         self.init_menu()
         self.init_ui()
+        self._edit_defaults = {
+            key: edit.text()
+            for edits in (self.edits, self._arc_edits, self._right_edits)
+            for key, edit in edits.items()
+        }
         for edits in (self.edits, self._arc_edits, self._right_edits):
             for edit in edits.values():
                 edit.textChanged.connect(self.action_clear_result)
         for combo in (self.cmb_pad, self.cmb_trailer_type, self.cmb_road, self.cmb_grade,
-                      self.cmb_turn_direction):
+                      self.cmb_turn_direction, self.cmb_clearance_mode, self.cmb_clearance_structure):
             combo.currentTextChanged.connect(self.action_clear_result)
+        for combo in (self.cmb_trailer_type, self.cmb_road, self.cmb_turn_direction, self.cmb_clearance_mode):
+            combo.currentTextChanged.connect(self._sync_inputs)
+        self.edits["combined_cg_height"].textChanged.connect(self._sync_inputs)
 
     # ================= 数据状态 =================
     def init_data(self):
-        self.edits = {}          # 数值编辑框：键见上面 *_FIELDS
-        self.checks = {}         # 复选框
-        self.combos = {}         # 下拉框：由控件引用持有
-        self.cur_result = None   # 最近一次 run_scene 结果
+        self.edits = {}
+        self._arc_edits = {}
+        self._right_edits = {}
+        self._form_rows = {}
+        self._methods_dialog = None
+        self.cur_result = None
         self.current_model_path = ""
         self._orig_pixmap = None
+        self._settings = QSettings("HAILPVS", "HAILPVS")
+        self._plot_style = self._settings.value("drawing/style", "overview", type=str)
+        if self._plot_style not in PLOT_STYLES:
+            self._plot_style = "overview"
 
     # ================= 菜单 =================
     def init_menu(self):
@@ -164,6 +187,18 @@ class MainWindow(QMainWindow):
         m_tool.addAction("清空检验结果", self.action_clear_result)
         m_tool.addSeparator()
         m_tool.addAction("检验方法说明", self.action_show_acceptance)
+        m_tool.addAction("切换全屏", self._toggle_fullscreen, QKeySequence("F11"))
+        m_tool.addAction("退出全屏", self._exit_fullscreen, QKeySequence("Esc"))
+        m_style = bar.addMenu("设置(&S)").addMenu("画图风格")
+        self._style_actions = QActionGroup(self)
+        self._style_actions.setExclusive(True)
+        for style, label in PLOT_STYLES.items():
+            action = m_style.addAction(label)
+            action.setCheckable(True)
+            action.setData(style)
+            self._style_actions.addAction(action)
+            action.setChecked(style == self._plot_style)
+        self._style_actions.triggered.connect(self._change_plot_style)
 
     # ================= 界面 =================
     def init_ui(self):
@@ -171,21 +206,24 @@ class MainWindow(QMainWindow):
         central.setObjectName("Workspace")
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-        layout.setContentsMargins(22, 12, 22, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(15, 10, 15, 15)
+        layout.setSpacing(10)
         layout.addWidget(self._build_header())
 
-        self.pages = QTabWidget()
-        self.pages.setObjectName("WorkspacePages")
-        self.inputs_page = self._build_inputs()
-        self.graph_page = self._build_results()
-        self.process_page = self._build_process()
-        self.methods_page = self._build_methods()
-        self.pages.addTab(self.inputs_page, "工况参数")
-        self.pages.addTab(self.graph_page, "扫掠图")
-        self.pages.addTab(self.process_page, "计算过程")
-        self.pages.addTab(self.methods_page, "方法参考")
-        layout.addWidget(self.pages, 1)
+        workspace = QSplitter(Qt.Horizontal)
+        workspace.setObjectName("WorkspaceSplitter")
+        workspace.setHandleWidth(9)
+        workspace.setChildrenCollapsible(False)
+        self.inputs_panel = self._build_inputs()
+        self.graph_panel = self._build_results()
+        self.process_panel = self._build_process()
+        workspace.addWidget(self.inputs_panel)
+        workspace.addWidget(self.graph_panel)
+        workspace.addWidget(self.process_panel)
+        workspace.setStretchFactor(1, 1)
+        workspace.setSizes([316, max(360, self.width() - 745), 385])
+        layout.addWidget(workspace, 1)
+        self._sync_inputs()
         self.action_clear_result()
 
     @staticmethod
@@ -194,147 +232,151 @@ class MainWindow(QMainWindow):
         label.setObjectName(style)
         return label
 
+    @staticmethod
+    def _panel(name, minimum_width):
+        panel = QFrame()
+        panel.setObjectName(name)
+        panel.setMinimumWidth(minimum_width)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(13, 12, 13, 13)
+        layout.setSpacing(10)
+        return panel, layout
+
     def _build_header(self):
         header = QFrame()
         header.setObjectName("WorkspaceHeader")
         row = QHBoxLayout(header)
-        row.setContentsMargins(0, 7, 0, 10)
-        row.setSpacing(8)
+        row.setContentsMargins(15, 9, 13, 10)
+        row.setSpacing(7)
         titles = QVBoxLayout()
         titles.setSpacing(2)
         titles.addWidget(self._heading("弯道通过性检验", "WorkspaceTitle"))
         self.model_label = self._heading("未命名模型", "ModelName")
+        self.model_label.setTextFormat(Qt.PlainText)
         titles.addWidget(self.model_label)
         row.addLayout(titles)
         row.addStretch(1)
-        for label, action in (("打开模型", self.action_open), ("保存模型", self.action_save)):
+        for label, action in (("打开", self.action_open), ("保存", self.action_save),
+                              ("方法参考", self.action_show_acceptance)):
             button = QPushButton(label)
-            button.setMinimumHeight(34)
+            button.setObjectName("HeaderButton")
+            button.setMinimumHeight(32)
             button.clicked.connect(action)
             row.addWidget(button)
         self.btn_export = QPushButton("导出 Word")
-        self.btn_export.setMinimumHeight(34)
+        self.btn_export.setObjectName("HeaderButton")
+        self.btn_export.setMinimumHeight(32)
         self.btn_export.clicked.connect(self.export_word)
         row.addWidget(self.btn_export)
         return header
 
+    def _toggle_fullscreen(self):
+        if self.isFullScreen():
+            self._exit_fullscreen()
+        else:
+            self.showFullScreen()
+
+    def _exit_fullscreen(self):
+        if self.isFullScreen():
+            self.showMaximized()
+
     def _build_inputs(self):
-        panel = QWidget()
-        layout = self._page_layout(panel)
-        road = self._build_road_column()
-        vehicles, trailer = self._build_vehicle_columns()
+        panel, layout = self._panel("InputPanel", 284)
+        layout.addWidget(self._heading("工况参数"))
+        form = QWidget()
+        form.setObjectName("ConditionForm")
+        form_layout = QVBoxLayout(form)
+        form_layout.setContentsMargins(0, 0, 4, 1)
+        form_layout.setSpacing(10)
+        self._build_road_groups(form_layout)
+        self._build_vehicle_groups(form_layout)
+        self._build_stability_group(form_layout)
+        form_layout.addStretch(1)
         scroll = QScrollArea()
+        scroll.setObjectName("FormScroll")
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setWidget(ParameterGrid((road, vehicles, trailer)))
+        scroll.setWidget(form)
         layout.addWidget(scroll, 1)
-        footer = QHBoxLayout()
-        footer.addStretch(1)
         self.btn_calc = QPushButton("运行弯道检验")
         self.btn_calc.setObjectName("RunButton")
-        self.btn_calc.setMinimumHeight(41)
-        self.btn_calc.setMinimumWidth(160)
+        self.btn_calc.setMinimumHeight(40)
         self.btn_calc.clicked.connect(self.run_calc)
-        footer.addWidget(self.btn_calc)
-        layout.addLayout(footer)
+        layout.addWidget(self.btn_calc)
         return panel
 
-    @staticmethod
-    def _page_layout(page):
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 16, 0, 0)
-        layout.setSpacing(12)
-        return layout
-
     def _build_results(self):
-        panel = QWidget()
-        layout = self._page_layout(panel)
-        body = QHBoxLayout()
-        body.setSpacing(14)
-        canvas = QFrame()
-        canvas.setObjectName("Canvas")
-        graph_layout = QVBoxLayout(canvas)
-        graph_layout.setContentsMargins(12, 10, 12, 12)
-        graph_layout.setSpacing(8)
-        graph_actions = QHBoxLayout()
-        graph_actions.addWidget(self._heading("弯道扫掠工程图"))
-        graph_actions.addStretch(1)
+        panel, layout = self._panel("Canvas", 330)
+        title = QHBoxLayout()
+        title.setSpacing(6)
+        title.addWidget(self._heading("扫掠图"))
+        self.lbl_status = QLabel()
+        self.lbl_status.setAlignment(Qt.AlignCenter)
+        self.lbl_status.setMinimumWidth(61)
+        title.addWidget(self.lbl_status)
+        title.addStretch(1)
         self.btn_preview = QPushButton("放大")
         self.btn_preview.clicked.connect(self.open_image_viewer)
         self.btn_save_img = QPushButton("保存 PNG")
         self.btn_save_img.clicked.connect(self.save_sweep_img)
-        graph_actions.addWidget(self.btn_preview)
-        graph_actions.addWidget(self.btn_save_img)
-        graph_layout.addLayout(graph_actions)
-        self.img_label = ClickableImageLabel()
-        self.img_label.setObjectName("SweepPreview")
-        self.img_label.setMinimumHeight(160)
-        self.img_label.clicked.connect(self.open_image_viewer)
-        graph_layout.addWidget(self.img_label, 1)
-        body.addWidget(canvas, 1)
-
-        summary = QFrame()
-        summary.setObjectName("Inspector")
-        summary.setFixedWidth(248)
-        inspector = QVBoxLayout(summary)
-        inspector.setContentsMargins(14, 13, 14, 13)
-        inspector.setSpacing(9)
-        title_row = QHBoxLayout()
-        title_row.addWidget(self._heading("检验结果"))
-        title_row.addStretch(1)
-        self.lbl_status = QLabel()
-        self.lbl_status.setAlignment(Qt.AlignCenter)
-        self.lbl_status.setMinimumWidth(65)
-        title_row.addWidget(self.lbl_status)
-        inspector.addLayout(title_row)
+        title.addWidget(self.btn_preview)
+        title.addWidget(self.btn_save_img)
+        layout.addLayout(title)
         self.scenario_label = self._heading("", "ScenarioLabel")
         self.scenario_label.setWordWrap(True)
-        inspector.addWidget(self.scenario_label)
+        layout.addWidget(self.scenario_label)
 
+        self.img_label = ClickableImageLabel()
+        self.img_label.setObjectName("SweepPreview")
+        self.img_label.setWordWrap(True)
+        self.img_label.setMinimumHeight(160)
+        self.img_label.clicked.connect(self.open_image_viewer)
+        layout.addWidget(self.img_label, 1)
+
+        metrics = QHBoxLayout()
+        metrics.setSpacing(7)
         self.metric_labels = []
         for _ in range(3):
             card = QFrame()
             card.setObjectName("MetricCard")
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(10, 6, 10, 7)
-            card_layout.setSpacing(2)
+            card_layout.setContentsMargins(6, 7, 6, 8)
+            card_layout.setSpacing(3)
             name = self._heading("", "MetricTitle")
+            name.setWordWrap(True)
             value = self._heading("", "MetricValue")
+            value.setWordWrap(True)
             card_layout.addWidget(name)
             card_layout.addWidget(value)
             self.metric_labels.append((name, value))
-            inspector.addWidget(card)
-        self.btn_process = QPushButton("查看公式与代入值")
-        self.btn_process.clicked.connect(lambda: self.pages.setCurrentWidget(self.process_page))
-        inspector.addWidget(self.btn_process)
-        inspector.addStretch(1)
-        body.addWidget(summary)
-        layout.addLayout(body, 1)
+            metrics.addWidget(card, 1)
+        layout.addLayout(metrics)
         return panel
 
     def _build_process(self):
-        panel = QWidget()
-        layout = self._page_layout(panel)
-        body = QHBoxLayout()
-        body.setSpacing(14)
-        self.process_sections = QListWidget()
-        self.process_sections.setObjectName("ProcessIndex")
-        self.process_sections.setAccessibleName("计算过程目录")
-        self.process_sections.setFixedWidth(213)
-        self.process_sections.currentRowChanged.connect(self._jump_to_step)
-        body.addWidget(self.process_sections)
+        panel, layout = self._panel("ProcessPanel", 285)
+        layout.addWidget(self._heading("计算过程"))
+        self.process_sections = QComboBox()
+        self.process_sections.setObjectName("ProcessSections")
+        self.process_sections.setMinimumHeight(32)
+        self.process_sections.setAccessibleName("计算过程章节")
+        self.process_sections.setPlaceholderText("跳转到章节")
+        self.process_sections.currentIndexChanged.connect(self._jump_to_step)
+        layout.addWidget(self.process_sections)
         self.text_result = QTextBrowser()
+        self.text_result.setObjectName("CalculationText")
         self.text_result.setOpenExternalLinks(False)
-        self.text_result.setDocumentTitle("本工况计算过程")
-        self.text_result.setPlaceholderText("运行检验后，可查看本工况的公式、代入值和逐项判定。")
-        self.text_result.document().setDocumentMargin(24)
-        body.addWidget(self.text_result, 1)
-        layout.addLayout(body, 1)
+        self.text_result.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.text_result.setPlaceholderText("运行检验后查看公式、代入值和判定。")
+        self.text_result.document().setDocumentMargin(5)
+        layout.addWidget(self.text_result, 1)
         return panel
 
     def _build_methods(self):
-        panel = QWidget()
-        layout = self._page_layout(panel)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("检验方法参考")
+        dialog.resize(870, 690)
+        layout = QVBoxLayout(dialog)
         self.methods_document = QTextBrowser()
         self.methods_document.setOpenExternalLinks(True)
         self.methods_document.document().setDocumentMargin(24)
@@ -344,122 +386,102 @@ class MainWindow(QMainWindow):
         except OSError:
             reference = f"# 检验方法参考\n\n{ACCEPTANCE_NOTE}\n\n[交通运输部发布公告]({_STANDARD_URL})"
         self.methods_document.setMarkdown(reference)
-        layout.addWidget(self.methods_document, 1)
-        return panel
+        layout.addWidget(self.methods_document)
+        return dialog
 
     # ---- 工况表单 ----
-    def _form_column(self, title):
-        column = QWidget()
-        layout = QVBoxLayout(column)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-        layout.addWidget(self._heading(title))
-        return column, layout
+    def _add_row(self, form, key, title, widget):
+        label = _row_label(title)
+        label.setBuddy(widget)
+        widget.setAccessibleName(title)
+        self._form_rows[key] = (label, widget)
+        form.addRow(label, widget)
 
-    def _build_vehicle_columns(self):
-        vehicle_column, vehicle = self._form_column("车货外廓")
-        trailer_column, trailer = self._form_column("挂车配置")
+    def _add_edits(self, form, fields, edits):
+        for title, key, default in fields:
+            edit = _new_edit(default)
+            if not default:
+                edit.setPlaceholderText(_OPTIONAL_HINTS.get(key, "必填"))
+            edits[key] = edit
+            self._add_row(form, key, title, edit)
 
-        g_c, f_c = _make_form_group("货物")
-        for label, key, field, numeric in _CARGO_FIELDS:
-            ed = _new_edit("0.0")
-            self.edits[key] = ed
-            f_c.addRow(_row_label(f"{label}："), ed)
-        self.cmb_pad = _new_combo(PAD_ITEMS, PAD_ITEMS[0] if PAD_ITEMS else "干燥的木板")
-        f_c.addRow(_row_label("货物衬垫："), self.cmb_pad)
-        vehicle.addWidget(g_c)
-
-        g_t, f_t = _make_form_group("板车与轴组")
-        self.cmb_trailer_type = _new_combo(TRAILER_TYPES, TRAILER_TYPES[0] if TRAILER_TYPES else "")
-        f_t.addRow(_row_label("挂车类型："), self.cmb_trailer_type)
-        for label, key, field, numeric in _TRAILER_FIELDS:
-            ed = _new_edit("0.0" if numeric else "")
-            self.edits[key] = ed
-            f_t.addRow(_row_label(f"{label}："), ed)
-        # 液压轴线挂车参数整组：仅选“液压轴线挂车”后可见（标签不带“(液压)”后缀）
-        g_hyd, f_hyd = _make_form_group("液压轴线挂车参数")
-        for label, key, field, numeric in _HYDRAULIC_TRAILER_FIELDS:
-            ed = _new_edit("0.0")
-            self.edits[key] = ed
-            f_hyd.addRow(_row_label(f"{label}："), ed)
-        # 每轴最大转向角默认取第六章典型值（B.1.2 D2，界面可调）
-        if "t_axle_steer_deg" in self.edits:
-            self.edits["t_axle_steer_deg"].setText(str(HYDRAULIC_AXLE_DEFAULT_STEER_DEG))
-        trailer.addWidget(g_t)
-        trailer.addWidget(g_hyd)
-        self.g_hyd = g_hyd
-        self.cmb_trailer_type.currentTextChanged.connect(self._sync_hydraulic_fields)
-        self._sync_hydraulic_fields()
-
-        g_car, f_car = _make_form_group("牵引车")
-        for label, key, field, numeric in _TRACTOR_FIELDS:
-            ed = _new_edit("0.0" if numeric else "")
-            self.edits[key] = ed
-            f_car.addRow(_row_label(f"{label}："), ed)
-        vehicle.addWidget(g_car)
-        vehicle.addStretch(1)
-        trailer.addStretch(1)
-        return vehicle_column, trailer_column
-
-    def _build_road_column(self):
-        column, v = self._form_column("道路与工况")
-        g_top, f_top = _make_form_group("道路条件")
-        self.cmb_road = _new_combo(ROAD_TYPES, ROAD_TYPES[0] if ROAD_TYPES else "")
-        self.cmb_road.currentTextChanged.connect(self._sync_road_fields)
-        f_top.addRow(_row_label("弯道类型："), self.cmb_road)
-        ed = _new_edit("7.5")
-        self.edits["vertical_clearance"] = ed
-        f_top.addRow(_row_label("垂直净空高度(m)："), ed)
-        v.addWidget(g_top)
-
-        # 圆弧弯道
-        self.g_arc, f_arc = _make_form_group("圆弧几何")
-        self._arc_edits = {}
-        for name, key, numeric in _ARC_FIELDS:
-            ed = _new_edit("0.0")
-            self._arc_edits[key] = ed
-            f_arc.addRow(_row_label(f"{name}："), ed)
-        v.addWidget(self.g_arc)
-
-        # 直角弯道
-        self.g_right, f_right = _make_form_group("路口几何")
+    def _build_road_groups(self, layout):
+        scenario, form = _make_form_group("工况类型")
+        self.cmb_road = _new_combo(ROAD_TYPES, ROAD_TYPES[0])
+        self._add_row(form, "road_type", "弯道类型", self.cmb_road)
+        self.cmb_trailer_type = _new_combo(TRAILER_TYPES, TRAILER_TYPES[0])
+        self._add_row(form, "trailer_type", "挂车类型", self.cmb_trailer_type)
         self.cmb_turn_direction = _new_combo(["右转", "左转"], "右转")
-        f_right.addRow(_row_label("实际转向："), self.cmb_turn_direction)
-        self._right_edits = {}
-        for name, key, numeric in _RIGHT_FIELDS:
-            ed = _new_edit("0.0" if numeric else "")
-            self._right_edits[key] = ed
-            f_right.addRow(_row_label(f"{name}："), ed)
-        v.addWidget(self.g_right)
+        self._add_row(form, "turn_direction", "检验方向", self.cmb_turn_direction)
+        layout.addWidget(scenario)
 
-        # 满载工况
-        g_cond, f_cond = _make_form_group("运行工况")
+        road, form = _make_form_group("道路与净空")
         self.cmb_grade = _new_combo(HIGHWAY_GRADES, "三级公路")
-        f_cond.addRow(_row_label("公路等级："), self.cmb_grade)
-        ed = _new_edit("10.0")
-        self.edits["max_speed_kmh"] = ed
-        f_cond.addRow(_row_label("最高行驶速度(km/h)："), ed)
-        for label, key, hint in (("弯道超高率", "superelevation", "选填，如 0.02"),
-                                 ("车货总体重心离地高 (m)", "combined_cg_height", "选填")):
-            ed = _new_edit("")
-            ed.setPlaceholderText(hint)
-            self.edits[key] = ed
-            f_cond.addRow(_row_label(f"{label}："), ed)
-        v.addWidget(g_cond)
+        self._add_row(form, "highway_grade", "公路等级", self.cmb_grade)
+        self._add_edits(form, _ARC_FIELDS, self._arc_edits)
+        self._add_edits(form, _RIGHT_FIELDS, self._right_edits)
+        self.cmb_clearance_mode = _new_combo(())
+        for mode, label in _CLEARANCE_MODES.items():
+            self.cmb_clearance_mode.addItem(label, mode)
+        self._add_row(form, "vertical_clearance_mode", "上方情况", self.cmb_clearance_mode)
+        self.cmb_clearance_structure = _new_combo(list(VERT_SCENARIO))
+        self.cmb_clearance_structure.setPlaceholderText("请选择")
+        self.cmb_clearance_structure.setCurrentIndex(-1)
+        self._add_row(form, "clearance_structure_type", "障碍类型", self.cmb_clearance_structure)
+        self._add_edits(form, [("最小顶部净空 (m)", "vertical_clearance", "")], self.edits)
+        self.edits["vertical_clearance"].setPlaceholderText("填实测值")
+        self.edits["vertical_clearance"].setToolTip("沿通行路径，路面到最低顶部障碍物底面的最小垂直距离。")
+        layout.addWidget(road)
 
-        v.addStretch(1)
-        self._sync_road_fields()
-        return column
+    def _build_vehicle_groups(self, layout):
+        cargo, form = _make_form_group("货物")
+        self._add_edits(form, _CARGO_FIELDS, self.edits)
+        layout.addWidget(cargo)
 
-    def _sync_road_fields(self):
-        mode = self.cmb_road.currentText()
-        is_arc = mode == "圆弧弯道"
-        self.g_arc.setVisible(is_arc)
-        self.g_right.setVisible(not is_arc)
+        trailer, form = _make_form_group("挂车")
+        self._add_edits(form, _TRAILER_FIELDS, self.edits)
+        layout.addWidget(trailer)
 
-    def _sync_hydraulic_fields(self):
-        # 液压轴线挂车参数整组仅在选择“液压轴线挂车”后显示
-        self.g_hyd.setVisible(self.cmb_trailer_type.currentText() == "液压轴线挂车")
+        self.g_tractor, form = _make_form_group("牵引车")
+        self._add_edits(form, _TRACTOR_FIELDS, self.edits)
+        layout.addWidget(self.g_tractor)
+
+    def _build_stability_group(self, layout):
+        stability, form = _make_form_group("横向稳定性")
+        self._add_edits(form, _STABILITY_FIELDS, self.edits)
+        self.cmb_pad = _new_combo(PAD_ITEMS)
+        self._add_row(form, "pad", "货物衬垫", self.cmb_pad)
+        layout.addWidget(stability)
+
+    def _inactive_fields(self):
+        is_arc = self.cmb_road.currentText() == "圆弧弯道"
+        hydraulic = "液压" in self.cmb_trailer_type.currentText()
+        inactive = set()
+        if is_arc:
+            inactive.update(("turn_direction", *self._right_edits))
+        else:
+            inactive.update(("highway_grade", "tr_track_width", *self._arc_edits))
+        if self.cmb_turn_direction.currentText() != "左转":
+            inactive.update(("W_section", "W_lturn"))
+        if hydraulic:
+            inactive.update(("t_kingpin_to_axle", "tr_wheelbase", "tr_max_steering_angle_deg",
+                             "tr_track_width", "tr_fifth_wheel_pos"))
+            if is_arc or TRACTOR_SWING_EXIT_FACTOR == 0:
+                inactive.add("tr_width")
+        else:
+            inactive.update(("t_axle_count", "t_axle_spacing", "t_axle_steer_deg"))
+        if self.edits["combined_cg_height"].text().strip():
+            inactive.add("c_cg_height")
+        if self.cmb_clearance_mode.currentData() != "obstacle":
+            inactive.update(("vertical_clearance", "clearance_structure_type"))
+        return inactive
+
+    def _sync_inputs(self):
+        inactive = self._inactive_fields()
+        for key, (label, field) in self._form_rows.items():
+            label.setVisible(key not in inactive)
+            field.setVisible(key not in inactive)
+        self.g_tractor.setVisible(any(key not in inactive for _, key, _ in _TRACTOR_FIELDS))
 
     # ================= 状态徽章 =================
     def set_status_badge(self, state):
@@ -474,10 +496,11 @@ class MainWindow(QMainWindow):
         road_type = self.cmb_road.currentText()
         is_right_angle = road_type == "直角弯道"
         grade = self.cmb_grade.currentText()
-        direction = f" · {self.cmb_turn_direction.currentText()}" if is_right_angle else ""
-        self.scenario_label.setText(f"{road_type}{direction} · {grade}")
-        names = ("所需宽度", "最大侵入深度", "顶部净空间隙") if is_right_angle else (
-            "转弯通道宽度", "最小横向净空", "顶部净空间隙")
+        road_detail = self.cmb_turn_direction.currentText() if is_right_angle else grade
+        self.scenario_label.setText(f"{road_type}  /  {road_detail}  /  {self.cmb_trailer_type.currentText()}")
+        top_name = "顶部净空间隙" if self.cmb_clearance_mode.currentData() == "obstacle" else "顶部净空"
+        names = ("所需宽度", "最大侵入深度", top_name) if is_right_angle else (
+            "转弯通道宽度", "最小横向净空", top_name)
         values = (None, None, None)
         if self.cur_result is not None:
             metrics = self.cur_result.metrics
@@ -490,11 +513,16 @@ class MainWindow(QMainWindow):
                 horizontal = min(metrics["clearance_inner"], metrics["clearance_outer"])
                 if metrics["lookup"] == "pass":
                     names = ("通道宽度（参考）", *names[1:])
-            vertical = self.cur_result.user_meta["vertical_clearance"] - metrics["total_height"]
+            vertical = metrics["vertical_clearance_gap"]
+            if vertical is None:
+                vertical = metrics["vertical_clearance_status"]
             values = (width, horizontal, vertical)
         for (title, output), name, value in zip(self.metric_labels, names, values):
             title.setText(name)
-            output.setText("—" if value is None else f"{value:.3f} m")
+            if isinstance(value, str):
+                output.setText(value)
+            else:
+                output.setText("—" if value is None else f"{value:.3f} m")
 
     def _set_model_path(self, path):
         self.current_model_path = path
@@ -503,22 +531,35 @@ class MainWindow(QMainWindow):
         self.model_label.setToolTip(path)
 
     # ================= 表单采集 → InputBundle =================
-    def _f(self, key, default="0.0"):
-        ed = self.edits.get(key)
-        return float(ed.text()) if ed else float(default)
+    def _f(self, key):
+        return self._number(self.edits[key])
 
     def _f_arc(self, key):
-        return float(self._arc_edits[key].text())
+        return self._number(self._arc_edits[key])
 
     def _f_right(self, key):
-        return float(self._right_edits[key].text())
+        return self._number(self._right_edits[key])
 
     @staticmethod
-    def _optional_number(edit):
+    def _number(edit, *, optional=False):
         text = edit.text().strip()
-        return float(text) if text else None
+        if not text:
+            if optional:
+                return None
+            raise ValueError(f"请填写{edit.accessibleName()}")
+        try:
+            return float(text)
+        except ValueError:
+            raise ValueError(f"{edit.accessibleName()}请输入数字") from None
 
     def collect_bundle(self) -> InputBundle:
+        inactive = self._inactive_fields()
+
+        def field(key, default=None, *, optional=False):
+            if key in inactive:
+                return default
+            return self._number(self.edits[key], optional=optional)
+
         cargo_w = self._f("c_width")
         cargo_l = self._f("c_length")
         trailer_w = self._f("t_width")
@@ -529,7 +570,7 @@ class MainWindow(QMainWindow):
             length=cargo_l,
             width=cargo_w,
             height=self._f("c_height"),
-            cg_height=self._f("c_cg_height"),
+            cg_height=field("c_cg_height", optional=True) or 0.0,
             is_overhang=overhang,
             cargo_bearing=self.cmb_pad.currentText(),
         )
@@ -538,55 +579,67 @@ class MainWindow(QMainWindow):
             column_type="单纵列",
             length=self._f("t_length"), width=self._f("t_width"),
             deck_height=self._f("t_deck_height"),
-            axle_count=int(self._f("t_axle_count")),
-            axle_spacing=self._f("t_axle_spacing"),
+            axle_count=field("t_axle_count", 1),
+            axle_spacing=field("t_axle_spacing", 1.5),
             track_width=self._f("t_track_width"),
-            kingpin_to_axle=self._optional_number(self.edits["t_kingpin_to_axle"]),
+            kingpin_to_axle=field("t_kingpin_to_axle", optional=True),
             steering_type="全轮强制转向",
-            axle_max_steering_angle_deg=self._f("t_axle_steer_deg"),
+            axle_max_steering_angle_deg=field("t_axle_steer_deg", HYDRAULIC_AXLE_DEFAULT_STEER_DEG),
         )
+        # 液压车型只在启用路口附加外摆时使用牵引车宽度，其余必填属性为模型占位值。
         tractor = TractorParams(
-            wheelbase=self._f("tr_wheelbase"),
-            max_steering_angle_deg=self._f("tr_max_steering_angle_deg"),
-            width=self._f("tr_width"),
-            track_width=self._optional_number(self.edits["tr_track_width"]),
-            fifth_wheel_pos=self._f("tr_fifth_wheel_pos"),
+            wheelbase=field("tr_wheelbase", 1.0),
+            max_steering_angle_deg=field("tr_max_steering_angle_deg", 45.0),
+            width=field("tr_width", 1.0),
+            track_width=field("tr_track_width", optional=True),
+            fifth_wheel_pos=field("tr_fifth_wheel_pos", 0.0),
         )
         road_type = self.cmb_road.currentText()
-        grade = self.cmb_grade.currentText()
-        superelevation = self._optional_number(self.edits["superelevation"])
+        road_fields = dict(
+            road_type=road_type,
+            highway_grade=self.cmb_grade.currentText(),
+            superelevation=field("superelevation", optional=True),
+            vertical_clearance_mode=self.cmb_clearance_mode.currentData(),
+            vertical_clearance=field("vertical_clearance"),
+        )
+        if "clearance_structure_type" not in inactive:
+            structure = self.cmb_clearance_structure.currentText()
+            if not structure:
+                raise ValueError("请选择顶部障碍类型")
+            road_fields["clearance_structure_type"] = structure
         if road_type == "圆弧弯道":
-            road = RoadParams(road_type=road_type,
-                              arc=ArcCorner(outer_radius=self._f_arc("outer_radius"),
-                                            lane_width=self._f_arc("lane_width")),
-                              vertical_clearance=self._f("vertical_clearance"),
-                              superelevation=superelevation,
-                              highway_grade=grade)
+            road = RoadParams(arc=ArcCorner(outer_radius=self._f_arc("outer_radius"),
+                                            lane_width=self._f_arc("lane_width")), **road_fields)
         else:
-            road = RoadParams(road_type=road_type,
-                              right_angle=RightAngleCorner(
+            direction = self.cmb_turn_direction.currentText()
+            left_widths = {
+                key: self._number(self._right_edits[key], optional=True)
+                for key in ("W_section", "W_lturn") if key not in inactive
+            }
+            road = RoadParams(right_angle=RightAngleCorner(
                                   entry_width=self._f_right("entry_width"),
                                   exit_width=self._f_right("exit_width"),
                                   corner_radius=self._f_right("corner_radius"),
                                   intersection_angle_deg=90.0,
-                                  turn_direction=self.cmb_turn_direction.currentText(),
-                                  W_section=self._optional_number(self._right_edits["W_section"]),
-                                  W_lturn=self._optional_number(self._right_edits["W_lturn"])),
-                              vertical_clearance=self._f("vertical_clearance"),
-                              superelevation=superelevation,
-                              highway_grade=grade)
+                                  turn_direction=direction, **left_widths), **road_fields)
         return InputBundle(cargo=cargo, trailer=trailer, tractor=tractor, road=road,
                            max_speed_kmh=self._f("max_speed_kmh"),
-                           combined_cg_height=self._optional_number(self.edits["combined_cg_height"]))
+                           combined_cg_height=field("combined_cg_height", optional=True))
 
     def run_calc(self):
         self.action_clear_result()
         try:
             bundle = self.collect_bundle()
-            model_data = self.pack_model_data()
-        except Exception as e:
+        except ValueError as e:
             QMessageBox.warning(self, "输入错误", f"参数采集/校验失败：\n{e}")
             return
+        inactive = self._inactive_fields()
+        inactive_keys = (
+            inactive
+            | {f"arc_{key}" for key in inactive.intersection(self._arc_edits)}
+            | {f"right_{key}" for key in inactive.intersection(self._right_edits)}
+        )
+        model_data = {key: value for key, value in self.pack_model_data().items() if key not in inactive_keys}
         self.set_status_badge("running")
         self.lbl_status.repaint()
         self.btn_calc.setEnabled(False)
@@ -602,45 +655,85 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
         res.user_meta = model_data
         self.cur_result = res
+        self.btn_export.setEnabled(True)
+        self.set_status_badge("pending" if res.pending else "ok" if res.pass_ok else "ng")
+        self._refresh_metrics()
+        self._render_result(res)
+        self._render_sweep_preview()
+
+    def _change_plot_style(self, action):
+        style = action.data()
+        if style == self._plot_style:
+            return
+        self._plot_style = style
+        self._settings.setValue("drawing/style", style)
+        if self.cur_result is not None:
+            self._render_sweep_preview()
+
+    def _render_sweep_preview(self):
+        self._orig_pixmap = None
+        self.btn_preview.setEnabled(False)
+        self.btn_save_img.setEnabled(False)
         try:
             with BytesIO() as image:
-                draw_sweep_view(res, image)
+                draw_sweep_view(self.cur_result, image, style=self._plot_style)
                 pm = QPixmap()
                 if not pm.loadFromData(image.getvalue(), "PNG"):
                     raise ValueError("无法读取生成的扫掠图")
         except Exception as e:
             self.img_label.set_preview(placeholder="扫掠图生成失败，可查看计算过程")
             QMessageBox.warning(self, "出图失败", f"扫掠图生成失败：{e}")
-            self.pages.setCurrentWidget(self.process_page)
         else:
             self._orig_pixmap = pm
             self.img_label.set_preview(pm)
             self.btn_preview.setEnabled(True)
             self.btn_save_img.setEnabled(True)
-            self.pages.setCurrentWidget(self.graph_page)
-        self.btn_export.setEnabled(True)
-        self.btn_process.setEnabled(True)
-        self.set_status_badge("ok" if res.pass_ok else "ng")
-        self._refresh_metrics()
-        self._render_result(res)
 
     def _render_result(self, res):
-        self.process_sections.clear()
-        html = []
-        verdict = "通过" if res.pass_ok else "不通过"
-        for line in [*res.verdict_lines, "【综合结论】", f"弯道检验结论：{verdict}"]:
+        sections, html = [], []
+        for line in [*res.verdict_lines, "【综合结论】", f"弯道检验结论：{res.verdict}"]:
             if line.startswith("【") and line.endswith("】"):
                 title = line[1:-1]
-                anchor = f"step-{self.process_sections.count()}"
-                self.process_sections.addItem(title)
-                html.append(f"<h2 style='margin-top:22px;color:#18447d;'>"
+                anchor = f"step-{len(sections)}"
+                sections.append(title)
+                html.append(f"<h2 style='margin-top:16px;font-size:14pt;color:#18447d;'>"
                             f"<a name='{anchor}'>{title}</a></h2>")
             else:
                 html.append(f"<p style='margin:0 0 6px;'>{colorize_verdict_html(line)}</p>")
+        with QSignalBlocker(self.process_sections):
+            self.process_sections.clear()
+            self.process_sections.addItems(sections)
+            self.process_sections.setCurrentIndex(max(0, self.process_sections.findText(
+                self._initial_process_section(res))))
         self.text_result.setHtml(
-            "<div style='font-size:11pt;color:#283d59;line-height:1.5;'>"
+            "<div style='font-size:10pt;color:#283d59;line-height:1.45;'>"
             + "".join(html) + "</div>")
-        self.process_sections.setCurrentRow(0)
+        self.process_sections.setEnabled(True)
+        self._jump_to_step(self.process_sections.currentIndex())
+
+    @staticmethod
+    def _initial_process_section(res):
+        metrics = res.metrics
+        if res.scene == "arc":
+            width_section = "宽度与横向净空"
+            if not metrics["steering_ok"] or metrics["sim_unstable"]:
+                return "轨迹与扫掠量测"
+            if not all(metrics[key] for key in ("turn_channel_ok", "swept_width_ok",
+                                                "inner_clearance_ok", "outer_clearance_ok")):
+                return width_section
+        else:
+            width_section = "转向宽度校核"
+            if not metrics["direction_width_ok"]:
+                return width_section
+            if not metrics["split_vehicle_ok"] or not metrics["split_cargo_ok"]:
+                return "路口扫掠越界"
+        if metrics["vert_clearance_ok"] is False:
+            return "垂直净空"
+        if not metrics["ok"]:
+            return "横向稳定性"
+        if res.pending:
+            return "垂直净空"
+        return width_section
 
     def _jump_to_step(self, row):
         if row >= 0:
@@ -673,7 +766,8 @@ class MainWindow(QMainWindow):
         d["road_type"] = self.cmb_road.currentText()
         d["turn_direction"] = self.cmb_turn_direction.currentText()
         d["highway_grade"] = self.cmb_grade.currentText()
-        d["vertical_clearance"] = self._f("vertical_clearance")
+        d["vertical_clearance_mode"] = self.cmb_clearance_mode.currentData()
+        d["clearance_structure_type"] = self.cmb_clearance_structure.currentText()
         for k, ed in self._arc_edits.items():
             d["arc_" + k] = ed.text()
         for k, ed in self._right_edits.items():
@@ -683,44 +777,27 @@ class MainWindow(QMainWindow):
 
     def unpack_model_data(self, d):
         self.action_clear_result()
-        for k, ed in self.edits.items():
-            if k in d:
-                ed.setText("" if k in _OPTIONAL_INPUTS and d[k] is None else str(d[k]))
-            elif k in _OPTIONAL_INPUTS:
-                ed.clear()
-        direction = d.get("turn_direction")
-        self.cmb_turn_direction.setCurrentText("左转" if direction == "左转" else "右转")
-        if "pad" in d:
-            self.cmb_pad.setCurrentText(str(d["pad"]))
-        if "trailer_type" in d:
-            self.cmb_trailer_type.setCurrentText(str(d["trailer_type"]))
-        if "road_type" in d:
-            self.cmb_road.setCurrentText(str(d["road_type"]))
-        if "highway_grade" in d:
-            self.cmb_grade.setCurrentText(str(d["highway_grade"]))
-        for k, ed in self._arc_edits.items():
-            if "arc_" + k in d:
-                ed.setText(str(d["arc_" + k]))
-        for k, ed in self._right_edits.items():
-            if "right_" + k in d:
-                value = d["right_" + k]
-                ed.setText("" if value is None else str(value))
-            elif k in ("W_section", "W_lturn"):
-                ed.clear()
-        self._sync_road_fields()
+        for prefix, edits in (("", self.edits), ("arc_", self._arc_edits), ("right_", self._right_edits)):
+            for key, edit in edits.items():
+                value = d.get(prefix + key, self._edit_defaults[key])
+                edit.setText("" if value is None else str(value))
+        for key, combo, default in (
+            ("pad", self.cmb_pad, self.cmb_pad.itemText(0)),
+            ("trailer_type", self.cmb_trailer_type, TRAILER_TYPES[0]),
+            ("road_type", self.cmb_road, ROAD_TYPES[0]),
+            ("highway_grade", self.cmb_grade, "三级公路"),
+            ("turn_direction", self.cmb_turn_direction, "右转"),
+            ("clearance_structure_type", self.cmb_clearance_structure, ""),
+        ):
+            index = combo.findText(str(d.get(key, default)))
+            combo.setCurrentIndex(index if index >= 0 else combo.findText(default))
+        mode = self.cmb_clearance_mode.findData(d.get("vertical_clearance_mode", "unknown"))
+        self.cmb_clearance_mode.setCurrentIndex(mode if mode >= 0 else 0)
+        self._sync_inputs()
 
     def action_new(self):
-        for key, ed in self.edits.items():
-            ed.setText("" if key in _OPTIONAL_INPUTS else "0.0")
-        self.edits["t_axle_steer_deg"].setText(str(HYDRAULIC_AXLE_DEFAULT_STEER_DEG))
-        self.cmb_turn_direction.setCurrentText("右转")
-        for key, edit in self._right_edits.items():
-            edit.setText("" if key in ("W_section", "W_lturn") else "0.0")
-        self.cmb_road.setCurrentText(ROAD_TYPES[0])
-        self._sync_road_fields()
-        self.action_clear_result()
+        self.unpack_model_data({})
         self._set_model_path("")
-        self.pages.setCurrentWidget(self.inputs_page)
 
     def action_open(self):
         from PyQt5.QtWidgets import QFileDialog
@@ -734,7 +811,6 @@ class MainWindow(QMainWindow):
                 return
             self.unpack_model_data(d)
             self._set_model_path(path)
-            self.pages.setCurrentWidget(self.inputs_page)
             QMessageBox.information(self, "已打开", f"模型已加载：{os.path.basename(path)}")
 
     def action_save(self):
@@ -765,16 +841,20 @@ class MainWindow(QMainWindow):
         self.set_status_badge("none")
         self.text_result.clear()
         self.process_sections.clear()
+        self.process_sections.setEnabled(False)
         self._orig_pixmap = None
         self.img_label.set_preview(placeholder=_EMPTY_PREVIEW)
         self.btn_preview.setEnabled(False)
         self.btn_save_img.setEnabled(False)
         self.btn_export.setEnabled(False)
-        self.btn_process.setEnabled(False)
         self._refresh_metrics()
 
     def action_show_acceptance(self):
-        self.pages.setCurrentWidget(self.methods_page)
+        if self._methods_dialog is None:
+            self._methods_dialog = self._build_methods()
+        self._methods_dialog.show()
+        self._methods_dialog.raise_()
+        self._methods_dialog.activateWindow()
 
     # ================= Word 导出（口令保护：EXPORT_PWD）=================
     def export_word(self):
@@ -803,11 +883,7 @@ class MainWindow(QMainWindow):
                                               "Word 文档 (*.docx)")
         if path:
             try:
-                assemble_and_save(res, path)
+                assemble_and_save(res, path, plot_style=self._plot_style)
                 QMessageBox.information(self, "导出成功", f"报告已生成：{path}")
             except Exception as e:
                 QMessageBox.warning(self, "导出失败", f"{e}")
-
-
-# 延迟导入，避免 import 循环
-from app.ui.widgets import ImageViewerDialog

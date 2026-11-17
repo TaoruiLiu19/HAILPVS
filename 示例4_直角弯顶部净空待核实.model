@@ -22,7 +22,7 @@
   "tr_height": "3.0",
   "tr_fifth_wheel_pos": "1.0",
   "tr_drawbar_length": "0",
-  "vertical_clearance": 7.5,
+  "vertical_clearance_mode": "unknown",
   "max_speed_kmh": "10",
   "load_factor": "1.0",
   "superelevation": "0.02",
@@ -43,6 +43,5 @@
   "median_type": "划线",
   "has_curve_widening": "0",
   "curve_widening_w": "0.0",
-  "clearance_structure_type": "跨线构造物",
   "saved_at": "2026-09-22 10:20:00"
 }

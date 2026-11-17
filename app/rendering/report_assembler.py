@@ -101,7 +101,7 @@ def _add_formula_para(doc, text, size=12, bold=False):
     return p
 
 
-def assemble_and_save(res: SweepScenarioResult, out_path):
+def assemble_and_save(res: SweepScenarioResult, out_path, *, plot_style="classic"):
     """按检验结果生成 Word 报告并保存。"""
     doc = Document()
 
@@ -130,9 +130,9 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
     # 不在此表赘述，详见"五、检验结论"的检验过程。
     rows = []
     m = res.metrics
-    rows.append(("公路等级", m.get('highway_grade', '')))
     rows.append(("大件运输尺寸级", m.get('size_grade', '')))
     if res.scene == "arc":
+        rows.append(("公路等级", m.get('highway_grade', '')))
         rows.append(("宽度判定方法", m.get("method", "")))
         rows.append(("几何扫掠宽度 (m)", f"{m.get('geometry_swept_w', 0):.3f}"))
         rows.append(("扫空空间宽度 (m)", f"{m.get('W_needed', 0):.3f}"))
@@ -157,7 +157,7 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
         if m.get("split_error"):
             rows.append(("扫掠校核", str(m["split_error"])))
     rows.append(("车货总高 (m)", f"{m.get('total_height', 0):.3f}"))
-    rows.append(("垂直净空", "满足" if m.get('vert_clearance_ok') else "不满足"))
+    rows.append(("垂直净空", m["vertical_clearance_status"]))
     rows.append(("横向稳定性", "满足" if m.get('ok') else "不满足"))
     _add_param_table(doc, rows, "三、车道与车辆扫掠结果")
 
@@ -165,7 +165,7 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
     h4 = doc.add_heading("", level=1)
     h4r = h4.add_run("四、弯道扫掠轨迹图")
     set_font_kai(h4r, 14, bold=True)
-    img_path = _render_img(res)
+    img_path = _render_img(res, plot_style)
     if img_path:
         try:
             doc.add_picture(img_path, width=Inches(6.2))
@@ -189,8 +189,7 @@ def assemble_and_save(res: SweepScenarioResult, out_path):
             set_font_kai(section.add_run(line[1:-1]), 12, bold=True)
         else:
             _add_formula_para(doc, line, 12)
-    verdict = "通过" if res.pass_ok else "不通过"
-    _add_para(doc, f"综合评定：该运输车辆（牵引车-挂车-货物）在该弯道工况下可通行性判定为【{verdict}】。", 12, bold=True)
+    _add_para(doc, f"综合评定：该运输车辆（牵引车-挂车-货物）在该弯道工况下可通行性判定为【{res.verdict}】。", 12, bold=True)
 
     doc.save(out_path)
     return out_path
@@ -214,6 +213,7 @@ def _assemble_meta(res: SweepScenarioResult):
         ("车板上表面离地高度(m)", "t_deck_height"),
         ("挂车轴数", "t_axle_count"),
         ("挂车轴距(m)", "t_axle_spacing"),
+        ("每轴最大转向角(°)", "t_axle_steer_deg"),
         ("轮距(m)", "t_track_width"),
         ("牵引销至挂车转动中心轴距离(m)", "t_kingpin_to_axle"),
         ("牵引车轴距(m)", "tr_wheelbase"),
@@ -222,6 +222,8 @@ def _assemble_meta(res: SweepScenarioResult):
         ("最高行驶速度(km/h)", "max_speed_kmh"),
         ("弯道超高率", "superelevation"),
         ("车货总体重心离地高(m)", "combined_cg_height"),
+        ("顶部障碍类型", "clearance_structure_type"),
+        ("实测最小顶部净空(m)", "vertical_clearance"),
     ]
     for name, key in mapping:
         if key in meta and meta[key] not in ("", None):
@@ -231,7 +233,7 @@ def _assemble_meta(res: SweepScenarioResult):
     return {"params": params}
 
 
-def _render_img(res):
+def _render_img(res, plot_style):
     """把扫掠图渲染为临时 PNG 供 Word 内嵌。
 
     仅捕获"渲染不可用"类异常（缺依赖/后端问题）；程序性错误（如 KeyError）
@@ -241,7 +243,7 @@ def _render_img(res):
         fd = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         path = fd.name
         fd.close()
-        draw_sweep_view(res, path)
+        draw_sweep_view(res, path, style=plot_style)
         return path
     except (ImportError, OSError, RuntimeError, ValueError) as exc:
         print(f"[报告] 扫掠图渲染失败：{type(exc).__name__}: {exc}")

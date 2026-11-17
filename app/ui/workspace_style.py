@@ -22,19 +22,24 @@ QMenuBar::item:selected, QMenu::item:selected { background: #dce8f9; color: #172
 QMenu { background: #ffffff; color: #172b48; border: 1px solid #cbd9eb; padding: 4px; }
 QMenu::item { padding: 5px 20px; }
 
-QFrame#WorkspaceHeader { border-bottom: 1px solid #ccd9eb; }
-QLabel#WorkspaceTitle { color: #132d55; font-size: 22pt; font-weight: 700; }
-QLabel#ModelName { color: #526987; font-size: 9pt; }
-QFrame#Canvas, QFrame#Inspector, QTextBrowser, QListWidget#ProcessIndex {
+QFrame#WorkspaceHeader {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #102c52, stop:1 #194780);
+    border-radius: 10px;
+}
+QLabel#WorkspaceTitle { color: #ffffff; font-size: 17pt; font-weight: 700; }
+QLabel#ModelName { color: #c4d8f3; font-size: 9pt; }
+QFrame#Canvas, QFrame#InputPanel, QFrame#ProcessPanel, QTextBrowser {
     background: #ffffff;
     border: 1px solid #d5e1f0;
     border-radius: 12px;
 }
+QSplitter#WorkspaceSplitter::handle { background: transparent; }
+QSplitter#WorkspaceSplitter::handle:hover { background: #a8c4ea; border-radius: 4px; }
 QLabel#PanelTitle { color: #1b3760; font-size: 13pt; font-weight: 700; }
 QLabel#ScenarioLabel { color: #506887; font-size: 9pt; }
 QFrame#MetricCard { background: #edf4ff; border: 1px solid #dae7f8; border-radius: 8px; }
 QLabel#MetricTitle { color: #506887; font-size: 9pt; }
-QLabel#MetricValue { color: #174785; font-size: 17pt; font-weight: 700; }
+QLabel#MetricValue { color: #174785; font-size: 13pt; font-weight: 700; }
 
 QPushButton {
     background: #ffffff;
@@ -49,6 +54,11 @@ QPushButton:hover { background: #e9f1ff; border-color: #8caee2; }
 QPushButton:pressed { background: #dbe8ff; }
 QPushButton:focus { border-color: #2e6fd1; }
 QPushButton:disabled { background: #eff3f8; color: #607489; border-color: #dce4ee; }
+QPushButton#HeaderButton { background: #24528a; color: #f2f7ff; border-color: #4270a5; }
+QPushButton#HeaderButton:hover { background: #33669f; border-color: #86afe0; }
+QPushButton#HeaderButton:pressed { background: #163b6d; }
+QPushButton#HeaderButton:focus { border-color: #b7d6fe; }
+QPushButton#HeaderButton:disabled { background: #204573; color: #b1c3da; border-color: #365d8a; }
 QPushButton#RunButton {
     background: #1c5cc5;
     color: #ffffff;
@@ -60,25 +70,11 @@ QPushButton#RunButton:pressed { background: #123e88; }
 QPushButton#RunButton:focus { border: 2px solid #9cc6ff; }
 QPushButton#RunButton:disabled { background: #526f97; border-color: #526f97; }
 
-QTabWidget::pane { border: 0; }
-QTabBar::tab {
-    background: #e0eaf8;
-    color: #3f597d;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    padding: 9px 18px;
-    margin-right: 7px;
-    min-width: 74px;
-    font-size: 10pt;
-}
-QTabBar::tab:hover { background: #d4e4fb; color: #16467e; }
-QTabBar::tab:selected { background: #123565; color: #ffffff; font-weight: 700; }
-QTabBar::tab:focus { border-color: #64a5fb; }
-QScrollArea, QScrollArea > QWidget > QWidget { background: #eef3f9; border: 0; }
+QScrollArea#FormScroll, QWidget#ConditionForm { background: #ffffff; border: 0; }
 QGroupBox {
-    background: #ffffff;
-    border: 1px solid #d5e1f0;
-    border-radius: 10px;
+    background: #f5f8fd;
+    border: 1px solid #dce6f4;
+    border-radius: 8px;
     color: #2d4d78;
     font-size: 10pt;
     font-weight: 700;
@@ -98,6 +94,8 @@ QLineEdit, QComboBox {
     selection-color: #ffffff;
 }
 QLineEdit:focus, QComboBox:focus { border-color: #2e6fd1; }
+QComboBox#ProcessSections { background: #edf4ff; color: #284f80; padding-left: 10px; }
+QComboBox#ProcessSections:disabled { color: #506887; border-color: #dce6f4; }
 QComboBox QAbstractItemView {
     background: #ffffff;
     color: #172b48;
@@ -113,10 +111,7 @@ QLabel#SweepPreview {
     font-size: 10pt;
 }
 QTextBrowser { color: #283d59; font-size: 11pt; }
-QListWidget#ProcessIndex { padding: 7px; color: #3f587b; font-size: 10pt; }
-QListWidget#ProcessIndex::item { padding: 9px 9px; margin-bottom: 3px; border-radius: 6px; }
-QListWidget#ProcessIndex::item:hover { background: #edf4ff; }
-QListWidget#ProcessIndex::item:selected { background: #dceaff; color: #184780; }
+QTextBrowser#CalculationText { border: 0; border-radius: 0; }
 QScrollBar:vertical { border: 0; background: #eaf0f8; width: 8px; }
 QScrollBar::handle:vertical { background: #aec2df; min-height: 24px; border-radius: 4px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }

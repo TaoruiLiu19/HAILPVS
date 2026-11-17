@@ -1,18 +1,29 @@
 """可复用控件与表单构建工具。"""
-from PyQt5.QtWidgets import (QLabel, QComboBox, QLineEdit, QGroupBox, QFormLayout,
-                             QDialog, QVBoxLayout, QHBoxLayout, QGraphicsView,
-                             QGraphicsScene, QGraphicsPixmapItem, QSizePolicy)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QPainter
+from PyQt5.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QFormLayout,
+    QGraphicsPixmapItem,
+    QGraphicsScene,
+    QGraphicsView,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QSizePolicy,
+    QVBoxLayout,
+)
 
 from .qtutil import _app_font, _primary_screen_geometry
 
 # ===== “基础信息输入 / 绑扎数据输入”排版常量：统一字号、行距与标签列宽 =====
 FORM_FONT_SIZE = 9      # 标签/控件的字体(pt)
 FORM_INPUT_H = 29       # 所有输入控件统一高度，保证行排列整齐
-FORM_LABEL_W = 156      # 长字段标签在窄窗口自动换行
+FORM_LABEL_W = 112      # 长字段标签在窄窗口自动换行
 FORM_INPUT_MAX_W = 200  # 输入控件最大宽度（避免长数字拥挤）
-FORM_V_SPACING = 7      # 行与行之间的垂直间距（行距均匀）
+FORM_V_SPACING = 6      # 行与行之间的垂直间距（行距均匀）
 
 
 def _row_label(text):
@@ -53,9 +64,9 @@ def _make_form_group(title):
     g.setFont(_app_font(FORM_FONT_SIZE, bold=True))
     form = QFormLayout(g)
     form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-    form.setHorizontalSpacing(12)
+    form.setHorizontalSpacing(8)
     form.setVerticalSpacing(FORM_V_SPACING)
-    form.setContentsMargins(12, 12, 12, 12)
+    form.setContentsMargins(9, 9, 9, 9)
     form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
     form.setRowWrapPolicy(QFormLayout.DontWrapRows)
     return g, form

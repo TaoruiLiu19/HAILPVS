@@ -100,7 +100,9 @@ class RoadParams(BaseModel):
     road_type: str = "圆弧弯道"
     arc: ArcCorner | None = None
     right_angle: RightAngleCorner | None = None
-    vertical_clearance: float = Field(7.5, gt=0, description="垂直净空高度(m)")
+    vertical_clearance_mode: Literal["unknown", "open", "obstacle"] = "unknown"
+    vertical_clearance: float | None = Field(
+        None, gt=0, allow_inf_nan=False, description="实测最小顶部净空高度(m)")
     highway_grade: str = "三级公路"        # 4.2.1 确定横向预留空间 σ
     lateral_clearance: float | None = Field(
         None, ge=0, description="横向预留空间 σ(m)，显式给定则优先于按公路等级取值")
@@ -116,12 +118,22 @@ class RoadParams(BaseModel):
     clearance_structure_type: str = Field(
         "跨线构造物", description="上跨桥/隧道/匝道/跨线构造物，决定净空阈值")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _interpret_legacy_clearance(cls, data):
+        if (isinstance(data, dict) and "vertical_clearance_mode" not in data
+                and data.get("vertical_clearance") is not None):
+            return {**data, "vertical_clearance_mode": "obstacle"}
+        return data
+
     @model_validator(mode="after")
     def _check_geometry(self):
         if self.road_type == "圆弧弯道" and self.arc is None:
             raise ValueError("圆弧弯道必须提供 outer_radius / lane_width")
         if self.road_type == "直角弯道" and self.right_angle is None:
             raise ValueError("直角弯道必须提供 entry_width / exit_width")
+        if self.vertical_clearance_mode == "obstacle" and self.vertical_clearance is None:
+            raise ValueError("有顶部障碍时必须填写实测最小顶部净空高度。")
         return self
 
 
